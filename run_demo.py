@@ -44,6 +44,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delays", default="0,2,5", help="Comma-separated tap delays in samples.")
     parser.add_argument("--powers-db", default="0,-3,-8", help="Comma-separated tap powers in dB.")
     parser.add_argument("--rician-k-db", type=float, default=6.0, help="Rician K-factor in dB.")
+    parser.add_argument("--doppler-hz", type=float, default=0.0, help="Maximum per-path Doppler shift in Hz.")
     parser.add_argument("--seed", type=int, default=7, help="Random seed.")
     parser.add_argument(
         "--semantic",
@@ -52,6 +53,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Use the real SwinJSCC model or deterministic fallback symbols.",
     )
     parser.add_argument("--h264-crf", type=int, default=28, help="H.264 CRF for the conventional branch.")
+    parser.add_argument(
+        "--channel-estimator",
+        choices=("ls", "comm_foundation"),
+        default="ls",
+        help="Channel estimator used at the UE equalizer.",
+    )
+    parser.add_argument(
+        "--comm-foundation-checkpoint",
+        default=None,
+        help="Checkpoint path for --channel-estimator comm_foundation.",
+    )
     return parser
 
 
@@ -71,12 +83,18 @@ def main() -> None:
         delays=parse_int_list(args.delays),
         powers_db=parse_float_list(args.powers_db),
         rician_k_db=args.rician_k_db,
+        doppler_hz=args.doppler_hz,
     )
     semantic_cfg = SemanticConfig(use_real_swinjscc=args.semantic == "swinjscc")
     conventional_cfg = ConventionalConfig(h264_crf=args.h264_crf)
     demo_cfg = DemoConfig(image_path=args.image)
 
-    output_paths = build_output_paths(demo_cfg.output_dir, channel_cfg.channel_type, phy_cfg.snr_db)
+    output_paths = build_output_paths(
+        demo_cfg.output_dir,
+        channel_cfg.channel_type,
+        phy_cfg.snr_db,
+        estimator_tag=args.channel_estimator,
+    )
     raw_console_path = Path(output_paths["raw_console"])
     raw_console_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -85,7 +103,13 @@ def main() -> None:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 sim = TDDPhysicalLayerSimulation(
-                    phy_cfg, channel_cfg, semantic_cfg, conventional_cfg, demo_cfg
+                    phy_cfg,
+                    channel_cfg,
+                    semantic_cfg,
+                    conventional_cfg,
+                    demo_cfg,
+                    channel_estimator=args.channel_estimator,
+                    comm_foundation_checkpoint=args.comm_foundation_checkpoint,
                 )
                 result = sim.run()
 
@@ -94,11 +118,13 @@ def main() -> None:
     semantic_psnr = key["reconstructed"].get("psnr_db")
     traditional_psnr = key["conventional"].get("psnr_db")
     csi_nmse_db = key["csi_feedback_quality"].get("bs_recovered_csi_nmse_db")
+    ce_nmse_db = key["channel_estimation_quality"].get("h_est_nmse_db")
     print(
         "Done. "
         f"Channel={key['channel_type']}, SNR={key['target_snr_db']} dB, "
         f"SwinJSCC PSNR={semantic_psnr:.2f} dB, "
         f"H.264+LDPC PSNR={traditional_psnr:.2f} dB, "
+        f"CE NMSE={ce_nmse_db:.2f} dB, "
         f"BS CSI NMSE={csi_nmse_db:.2f} dB."
     )
     print(f"Summary: {result.output_paths['run_summary_json']}")
@@ -114,6 +140,7 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
     conventional = summary["conventional"]
     reconstructed = summary["reconstructed"]
     csi = summary["csi_feedback_quality"]
+    ce = summary["channel_estimation_quality"]
     lines = [
         "# NR TDD Semantic PHY Run Summary",
         "",
@@ -121,6 +148,7 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
         f"- Target SNR: `{summary['target_snr_db']} dB`",
         f"- DL measured SNR: `{summary['dl_measured_snr_db']:.2f} dB`",
         f"- UL measured SNR: `{summary['ul_measured_snr_db']:.2f} dB`",
+        f"- Doppler: `{summary['channel_doppler_hz']} Hz`",
         f"- DL used symbols: `{summary['dl_used_symbols']}`",
         "",
         "## Image Reconstruction",
@@ -142,6 +170,13 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
         f"- Feedback BER: `{csi.get('feedback_ber'):.6g}`",
         f"- UE compression NMSE: `{csi.get('ue_compression_nmse_db'):.2f} dB`",
         f"- BS recovered CSI NMSE: `{csi.get('bs_recovered_csi_nmse_db'):.2f} dB`",
+        "",
+        "## Channel Estimation",
+        "",
+        f"- Estimator: `{ce.get('estimator')}`",
+        f"- H_hat NMSE: `{ce.get('h_est_nmse_db'):.2f} dB`",
+        f"- Semantic equalized EVM: `{ce.get('semantic_evm_db'):.2f} dB`",
+        f"- Estimator inference time: `{ce.get('estimator_inference_time_ms'):.3f} ms`",
         "",
         "## Artifacts",
         "",

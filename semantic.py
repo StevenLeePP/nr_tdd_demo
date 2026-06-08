@@ -40,6 +40,7 @@ class SwinJSCCInterface:
         self.semantic_state: Dict[str, object] = {}
         self.last_reconstruction: Optional[np.ndarray] = None
         self.last_original: Optional[np.ndarray] = None
+        self.last_tx_symbols: Optional[np.ndarray] = None
         self.last_metrics: Dict[str, float | int | str] = {}
 
         if self.cfg.use_real_swinjscc:
@@ -177,6 +178,7 @@ class SwinJSCCInterface:
         }
         self.last_original = original_np
         self.last_reconstruction = None
+        self.last_tx_symbols = symbols.copy()
         self.last_metrics = {
             "encoder": "SwinJSCC",
             "model_path": self.cfg.model_path,

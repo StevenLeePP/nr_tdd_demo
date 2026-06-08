@@ -60,11 +60,15 @@ nr_tdd_semantic/
 ├── channel.py           # 多径信道模型 (AWGN/Rayleigh/Rician)
 ├── conventional.py      # H.264 + LDPC 传统编解码方案
 ├── dsp.py               # 信道估计 (LS)、CSI 压缩/解压
+├── learned_estimator.py # 复值通信基座模型推理包装
+├── models/              # 复值层、通信 backbone、任务头
 ├── nodes.py             # BS 基站与 UE 用户设备节点
 ├── ofdm.py              # OFDM 调制/解调
 ├── resource_grid.py     # 时频资源网格映射 (导频+数据)
 ├── semantic.py          # SwinJSCC 语义编解码接口
 ├── simulation.py        # 端到端仿真主循环
+├── scripts/             # 数据集导出与模型训练脚本
+├── reports/             # 工程探索报告
 ├── utils.py             # 工具函数 (QPSK调制解调、复数数组等)
 ├── visualization.py     # 可视化 (星座图、PSNR对比、资源网格)
 ├── run_demo.py          # 命令行入口 🚀
@@ -118,7 +122,36 @@ python run_demo.py \
     --powers-db "0,-3,-9" \
     --seed 42 \
     --semantic swinjscc \
-    --h264-crf 28
+    --h264-crf 28 \
+    --channel-estimator ls
+
+# 使用复值通信基座模型信道估计器
+python run_demo.py \
+    --channel rayleigh \
+    --snr-db 20 \
+    --channel-estimator comm_foundation \
+    --comm-foundation-checkpoint outputs/comm_foundation_ckpt_sanity/best_comm_foundation_channel_estimator.pt
+```
+
+### 通信基座模型数据集与训练
+
+```bash
+# 导出 CSI/IQ sanity 数据集
+python scripts/export_comm_foundation_dataset.py \
+    --num_samples 100 \
+    --snr_min 0 \
+    --snr_max 30 \
+    --channel_mode mixed \
+    --output_path outputs/comm_foundation_sanity_100.npz
+
+# 训练最小复值 backbone + 信道估计 head
+python scripts/train_comm_foundation_model.py \
+    --dataset_path outputs/comm_foundation_sanity_100.npz \
+    --output_dir outputs/comm_foundation_ckpt_sanity \
+    --epochs 1 \
+    --batch_size 16 \
+    --use_masked_csi \
+    --use_denoising
 ```
 
 ## 命令行参数
@@ -136,9 +169,12 @@ python run_demo.py \
 | `--delays` | str | "0,2,5" | 多径时延 (采样点) |
 | `--powers-db` | str | "0,-3,-8" | 多径功率 (dB) |
 | `--rician-k-db` | float | 6.0 | Rician K 因子 (dB) |
+| `--doppler-hz` | float | 0.0 | 每径最大 Doppler 频移 (Hz) |
 | `--seed` | int | 7 | 随机种子 |
 | `--semantic` | choice | swinjscc | 语义模型：`swinjscc`, `fallback` |
 | `--h264-crf` | int | 28 | H.264 CRF 质量参数 |
+| `--channel-estimator` | choice | ls | 信道估计器：`ls`, `comm_foundation` |
+| `--comm-foundation-checkpoint` | str | None | 复值通信基座模型 checkpoint |
 
 ## 核心模块说明
 

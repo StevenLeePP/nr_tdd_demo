@@ -23,10 +23,15 @@ except Exception:  # noqa: BLE001
     Patch = None
 
 
-def build_output_paths(output_dir: Path, channel_type: str, snr_db: float) -> dict[str, str]:
+def build_output_paths(
+    output_dir: Path,
+    channel_type: str,
+    snr_db: float,
+    estimator_tag: str = "ls",
+) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     snr_tag = f"{snr_db:g}dB".replace(".", "p")
-    prefix = f"{channel_type.lower()}_snr_{snr_tag}"
+    prefix = f"{channel_type.lower()}_snr_{snr_tag}_{estimator_tag}"
     return {
         "semantic_constellation": str(output_dir / f"{prefix}_semantic_constellation_equalization.png"),
         "traditional_constellation": str(output_dir / f"{prefix}_h264_ldpc_constellation_equalization.png"),

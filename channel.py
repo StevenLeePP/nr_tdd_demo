@@ -16,6 +16,7 @@ class ChannelOutput:
     impulse_response: ComplexArray
     noise_variance: float
     measured_snr_db: float
+    frequency_response_grid: ComplexArray | None = None
 
 
 class MultipathChannel:
@@ -28,6 +29,7 @@ class MultipathChannel:
         delays: Sequence[int] = (0, 2, 5),
         powers_db: Sequence[float] = (0.0, -3.0, -8.0),
         rician_k_db: float = 6.0,
+        doppler_hz: float = 0.0,
         rng: Optional[np.random.Generator] = None,
     ) -> None:
         self.cfg = cfg
@@ -37,6 +39,7 @@ class MultipathChannel:
         self.powers_linear = db_to_linear(self.powers_db)
         self.powers_linear = self.powers_linear / np.sum(self.powers_linear)
         self.rician_k_linear = db_to_linear(rician_k_db)
+        self.doppler_hz = float(doppler_hz)
         self.rng = rng if rng is not None else np.random.default_rng(cfg.rng_seed)
 
         if self.delays.size != self.powers_linear.size:
@@ -45,11 +48,14 @@ class MultipathChannel:
             raise ValueError("Path delays must be non-negative sample offsets.")
         if self.channel_type not in {"awgn", "rayleigh", "rician"}:
             raise ValueError("channel_type must be awgn, rayleigh, or rician.")
+        if self.doppler_hz < 0:
+            raise ValueError("doppler_hz must be non-negative.")
 
     def describe(self) -> str:
         return (
             f"{self.channel_type.upper()} channel, target SNR {self.cfg.snr_db:g} dB, "
-            f"delays={self.delays.tolist()}, PDP(dB)={self.powers_db.tolist()}"
+            f"delays={self.delays.tolist()}, PDP(dB)={self.powers_db.tolist()}, "
+            f"doppler={self.doppler_hz:g} Hz"
         )
 
     def sample_impulse_response(self) -> ComplexArray:
@@ -77,13 +83,73 @@ class MultipathChannel:
     def transmit(self, waveform: ComplexArray, h: Optional[ComplexArray] = None) -> ChannelOutput:
         h = self.sample_impulse_response() if h is None else np.asarray(h, dtype=np.complex128)
 
-        # Time-domain convolution makes the TDL channel frequency-selective
-        # across OFDM subcarriers once the receiver FFTs each CP-protected symbol.
-        faded = np.convolve(waveform, h, mode="full")[: waveform.size]
+        if self.doppler_hz > 0.0 and self.channel_type != "awgn" and h.size > 1:
+            faded, h_grid = self._transmit_time_varying(waveform, h)
+        else:
+            # Time-domain convolution makes the TDL channel frequency-selective
+            # across OFDM subcarriers once the receiver FFTs each CP-protected symbol.
+            faded = np.convolve(waveform, h, mode="full")[: waveform.size]
+            n_slots = max(1, int(round(waveform.size / self.cfg.slot_samples)))
+            h_grid = impulse_response_to_grid(self.cfg, h, n_slots=n_slots)
         signal_power = float(np.mean(np.abs(faded) ** 2))
         noise_variance = signal_power / db_to_linear(self.cfg.snr_db)
         noise = math.sqrt(noise_variance / 2.0) * (
             self.rng.normal(size=faded.size) + 1j * self.rng.normal(size=faded.size)
         )
         measured_snr_db = 10.0 * math.log10(signal_power / max(noise_variance, 1e-30))
-        return ChannelOutput(faded + noise, h, noise_variance, measured_snr_db)
+        return ChannelOutput(faded + noise, h, noise_variance, measured_snr_db, h_grid)
+
+    def _transmit_time_varying(self, waveform: ComplexArray, h: ComplexArray) -> tuple[ComplexArray, ComplexArray]:
+        active_delays = np.flatnonzero(np.abs(h) > 0)
+        taps = h[active_delays]
+        path_dopplers = self.rng.uniform(-self.doppler_hz, self.doppler_hz, size=active_delays.size)
+        n = np.arange(waveform.size, dtype=float)
+        faded = np.zeros_like(waveform, dtype=np.complex128)
+        for delay, tap, fd in zip(active_delays, taps, path_dopplers):
+            delayed = np.zeros_like(waveform, dtype=np.complex128)
+            delayed[delay:] = waveform[: waveform.size - delay]
+            phase = np.exp(1j * 2.0 * np.pi * fd * n / self.cfg.sample_rate_hz)
+            faded += tap * phase * delayed
+        n_slots = max(1, int(round(waveform.size / self.cfg.slot_samples)))
+        h_grid = time_varying_impulse_response_to_grid(self.cfg, active_delays, taps, path_dopplers, n_slots)
+        return faded, h_grid
+
+
+def impulse_response_to_grid(cfg: NRPhyConfig, h: ComplexArray, n_slots: int = 1) -> ComplexArray:
+    """Convert a time-domain channel impulse response to active-subcarrier H_true.
+
+    The simulator channel is block-static over the generated frame, so the same
+    frequency response is repeated over every OFDM symbol and slot.
+    """
+    h = np.asarray(h, dtype=np.complex128)
+    h_bins = np.fft.fftshift(np.fft.fft(h, n=cfg.n_fft))
+    active_h = h_bins[cfg.active_fft_slice]
+    slot_grid = np.tile(active_h[:, None], (1, cfg.symbols_per_slot))
+    return np.stack([slot_grid.copy() for _ in range(n_slots)], axis=0)
+
+
+def time_varying_impulse_response_to_grid(
+    cfg: NRPhyConfig,
+    delays: np.ndarray,
+    taps: ComplexArray,
+    path_dopplers_hz: np.ndarray,
+    n_slots: int,
+) -> ComplexArray:
+    """Approximate per-symbol H_true for the lightweight Doppler channel."""
+    grids = np.zeros((n_slots, cfg.n_subcarriers, cfg.symbols_per_slot), dtype=np.complex128)
+    symbol_offsets = []
+    cursor = 0
+    for cp in cfg.cp_lengths:
+        symbol_offsets.append(cursor + cp + cfg.n_fft / 2.0)
+        cursor += cp + cfg.n_fft
+    for slot_idx in range(n_slots):
+        slot_start = slot_idx * cfg.slot_samples
+        for sym_idx, sym_center in enumerate(symbol_offsets):
+            sample_time = (slot_start + sym_center) / cfg.sample_rate_hz
+            h = np.zeros(int(np.max(delays)) + 1, dtype=np.complex128)
+            phases = np.exp(1j * 2.0 * np.pi * path_dopplers_hz * sample_time)
+            for delay, tap in zip(delays, taps * phases):
+                h[int(delay)] += tap
+            h_bins = np.fft.fftshift(np.fft.fft(h, n=cfg.n_fft))
+            grids[slot_idx, :, sym_idx] = h_bins[cfg.active_fft_slice]
+    return grids

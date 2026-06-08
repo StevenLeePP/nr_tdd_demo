@@ -5,10 +5,11 @@ from typing import Dict, Sequence, Tuple
 
 import numpy as np
 
-from .channel import MultipathChannel
+from .channel import MultipathChannel, impulse_response_to_grid
 from .config import ChannelConfig, ConventionalConfig, DemoConfig, NRPhyConfig, SemanticConfig
 from .conventional import H264LDPCImageCodec
 from .dsp import CompressedCSI, compress_csi, csi_nmse, decompress_csi
+from .learned_estimator import LearnedChannelEstimator
 from .nodes import BaseStation, UserEquipment
 from .semantic import SwinJSCCInterface
 from .utils import ComplexArray, qpsk_demodulate, qpsk_modulate
@@ -35,9 +36,11 @@ class SimulationResult:
     dl_measured_snr_db: float
     ul_measured_snr_db: float
     channel_type: str
+    channel_doppler_hz: float
     output_paths: Dict[str, str]
     conventional_metadata: Dict[str, int | float | str]
     csi_feedback_quality: Dict[str, int | float]
+    channel_estimation_quality: Dict[str, int | float | str]
 
     def summary(self) -> Dict[str, object]:
         return {
@@ -46,6 +49,7 @@ class SimulationResult:
             "dl_measured_snr_db": self.dl_measured_snr_db,
             "ul_measured_snr_db": self.ul_measured_snr_db,
             "dl_used_symbols": self.dl_used_symbols,
+            "channel_doppler_hz": self.channel_doppler_hz,
             "csi_bits": self.csi_bits,
             "ul_used_symbols": self.ul_used_symbols,
             "bs_feedback_bit_errors": self.bs_feedback_bit_errors,
@@ -59,6 +63,7 @@ class SimulationResult:
             "output_paths": self.output_paths,
             "conventional": self.conventional_metadata,
             "csi_feedback_quality": self.csi_feedback_quality,
+            "channel_estimation_quality": self.channel_estimation_quality,
             "reconstructed": self.reconstructed,
         }
 
@@ -74,16 +79,20 @@ class TDDPhysicalLayerSimulation:
         conventional_cfg: ConventionalConfig,
         demo_cfg: DemoConfig,
         reciprocal_tdd: bool = True,
+        channel_estimator: str = "ls",
+        comm_foundation_checkpoint: str | None = None,
     ) -> None:
         self.phy_cfg = phy_cfg
         self.channel_cfg = channel_cfg
         self.semantic_cfg = semantic_cfg
         self.conventional_cfg = conventional_cfg
         self.demo_cfg = demo_cfg
+        self.channel_estimator = channel_estimator
         self.output_paths = build_output_paths(
             self.demo_cfg.output_dir,
             self.channel_cfg.channel_type,
             self.phy_cfg.snr_db,
+            estimator_tag=self.channel_estimator,
         )
 
         self.codec = SwinJSCCInterface(
@@ -92,8 +101,16 @@ class TDDPhysicalLayerSimulation:
             channel_type=channel_cfg.channel_type,
         )
         self.conventional_codec = H264LDPCImageCodec(conventional_cfg)
+        learned_estimator = None
+        if channel_estimator == "comm_foundation":
+            if not comm_foundation_checkpoint:
+                raise ValueError("comm_foundation estimator requires a checkpoint path.")
+            learned_estimator = LearnedChannelEstimator(comm_foundation_checkpoint)
+        elif channel_estimator != "ls":
+            raise ValueError("channel_estimator must be 'ls' or 'comm_foundation'.")
+
         self.bs = BaseStation(phy_cfg, self.codec)
-        self.ue = UserEquipment(phy_cfg, self.codec)
+        self.ue = UserEquipment(phy_cfg, self.codec, learned_estimator=learned_estimator)
         rng = np.random.default_rng(phy_cfg.rng_seed)
         self.channel = MultipathChannel(
             phy_cfg,
@@ -101,6 +118,7 @@ class TDDPhysicalLayerSimulation:
             delays=channel_cfg.delays,
             powers_db=channel_cfg.powers_db,
             rician_k_db=channel_cfg.rician_k_db,
+            doppler_hz=channel_cfg.doppler_hz,
             rng=rng,
         )
         self.reciprocal_tdd = reciprocal_tdd
@@ -111,6 +129,11 @@ class TDDPhysicalLayerSimulation:
 
         dl_build = self.bs.build_downlink(self.demo_cfg.image_path, conventional_symbols)
         dl_channel = self.channel.transmit(dl_build.waveform)
+        h_true = (
+            dl_channel.frequency_response_grid
+            if dl_channel.frequency_response_grid is not None
+            else impulse_response_to_grid(self.phy_cfg, dl_channel.impulse_response, n_slots=self.phy_cfg.n_dl_slots)
+        )
 
         dl_rx = self.ue.receive_downlink(
             dl_channel.waveform,
@@ -158,6 +181,16 @@ class TDDPhysicalLayerSimulation:
         bit_errors = int(np.sum(recovered_bits[:comparable] != compressed.bitstream[:comparable]))
         bit_errors += int(compressed.bitstream.size - comparable)
         csi_quality = self._evaluate_csi_feedback(dl_rx.h_est, compressed, recovered_bits, bit_errors)
+        ce_quality = {
+            "estimator": self.channel_estimator,
+            "h_est_nmse": float(csi_nmse(h_true, dl_rx.h_est)),
+            "h_est_nmse_db": float(10.0 * np.log10(max(csi_nmse(h_true, dl_rx.h_est), 1e-30))),
+            "semantic_evm": float(self._evm(self.codec.last_tx_symbols, dl_rx.semantic_equalized)),
+            "semantic_evm_db": float(
+                20.0 * np.log10(max(self._evm(self.codec.last_tx_symbols, dl_rx.semantic_equalized), 1e-30))
+            ),
+            "estimator_inference_time_ms": float(dl_rx.estimator_inference_time_ms),
+        }
 
         self._write_visualizations(
             dl_grids=dl_build.grids,
@@ -181,9 +214,11 @@ class TDDPhysicalLayerSimulation:
             dl_measured_snr_db=dl_channel.measured_snr_db,
             ul_measured_snr_db=ul_channel.measured_snr_db,
             channel_type=self.channel_cfg.channel_type,
+            channel_doppler_hz=self.channel_cfg.doppler_hz,
             output_paths=self.output_paths,
             conventional_metadata=traditional_meta,
             csi_feedback_quality=csi_quality,
+            channel_estimation_quality=ce_quality,
         )
 
     def _write_visualizations(
@@ -273,3 +308,16 @@ class TDDPhysicalLayerSimulation:
         if mse <= 1e-12:
             return float("inf")
         return 10.0 * np.log10(1.0 / mse)
+
+    @staticmethod
+    def _evm(reference: ComplexArray | None, estimate: ComplexArray) -> float:
+        if reference is None:
+            return float("nan")
+        reference = np.asarray(reference, dtype=np.complex128).reshape(-1)
+        estimate = np.asarray(estimate, dtype=np.complex128).reshape(-1)[: reference.size]
+        return float(
+            np.sqrt(
+                np.mean(np.abs(estimate - reference[: estimate.size]) ** 2)
+                / max(np.mean(np.abs(reference[: estimate.size]) ** 2), 1e-30)
+            )
+        )

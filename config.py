@@ -95,6 +95,7 @@ class ChannelConfig:
     delays: tuple[int, ...] = (0, 2, 5)
     powers_db: tuple[float, ...] = (0.0, -3.0, -8.0)
     rician_k_db: float = 6.0
+    doppler_hz: float = 0.0
 
 
 @dataclass(frozen=True)

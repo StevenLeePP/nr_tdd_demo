@@ -30,6 +30,7 @@ class DownlinkReceive:
     conventional_pre_equalized: ComplexArray
     conventional_equalized: ComplexArray
     h_est: ComplexArray
+    estimator_inference_time_ms: float
 
 
 class BaseStation:
@@ -80,9 +81,10 @@ class BaseStation:
 
 
 class UserEquipment:
-    def __init__(self, cfg: NRPhyConfig, codec: SwinJSCCInterface) -> None:
+    def __init__(self, cfg: NRPhyConfig, codec: SwinJSCCInterface, learned_estimator=None) -> None:
         self.cfg = cfg
         self.codec = codec
+        self.learned_estimator = learned_estimator
         self.mapper = ResourceGridMapper(cfg, "DL")
         self.ul_mapper = ResourceGridMapper(cfg, "UL")
         self.modem = OFDMModem(cfg)
@@ -98,9 +100,13 @@ class UserEquipment:
         rx_grids = self.modem.demodulate_frame(waveform, self.cfg.n_dl_slots)
         h_est_slots = []
         equalized_grids = []
+        estimator_inference_time_ms = 0.0
 
         for slot_idx, rx_grid in enumerate(rx_grids):
             h_est = self.estimator.estimate_slot(rx_grid, slot_idx)
+            if self.learned_estimator is not None:
+                h_est = self.learned_estimator.predict(h_est)
+                estimator_inference_time_ms += float(self.learned_estimator.last_inference_time_ms)
             h_est_slots.append(h_est)
             equalized_grids.append(
                 self.estimator.equalize(rx_grid, h_est, method="mmse", noise_variance=noise_variance)
@@ -126,6 +132,7 @@ class UserEquipment:
             conventional_pre_equalized=conventional_pre,
             conventional_equalized=conventional_eq,
             h_est=np.stack(h_est_slots, axis=0),
+            estimator_inference_time_ms=estimator_inference_time_ms,
         )
 
     def build_csi_feedback(self, compressed_csi: CompressedCSI) -> Tuple[ComplexArray, int, List[ComplexArray]]:

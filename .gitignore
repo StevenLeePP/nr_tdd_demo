@@ -46,6 +46,9 @@ saves/
 *.mat
 dataset/
 
+# Local reference papers
+*.pdf
+
 # Cache
 .cache/
 cache/
