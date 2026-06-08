@@ -125,7 +125,8 @@ def main() -> None:
         f"SwinJSCC PSNR={semantic_psnr:.2f} dB, "
         f"H.264+LDPC PSNR={traditional_psnr:.2f} dB, "
         f"CE NMSE={ce_nmse_db:.2f} dB, "
-        f"BS CSI NMSE={csi_nmse_db:.2f} dB."
+        f"BS CSI NMSE={csi_nmse_db:.2f} dB, "
+        f"Feedback={key['csi_feedback_quality'].get('feedback_method')}."
     )
     print(f"Summary: {result.output_paths['run_summary_json']}")
     print(f"Artifacts: {demo_cfg.output_dir}")
@@ -166,10 +167,12 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
         "",
         "## CSI Feedback",
         "",
+        f"- Feedback method: `{csi.get('feedback_method')}`",
         f"- Feedback bits: `{csi.get('feedback_bits')}`",
         f"- Feedback BER: `{csi.get('feedback_ber'):.6g}`",
         f"- UE compression NMSE: `{csi.get('ue_compression_nmse_db'):.2f} dB`",
         f"- BS recovered CSI NMSE: `{csi.get('bs_recovered_csi_nmse_db'):.2f} dB`",
+        f"- BS recovered true CSI NMSE: `{csi.get('bs_recovered_true_csi_nmse_db'):.2f} dB`",
         "",
         "## Channel Estimation",
         "",

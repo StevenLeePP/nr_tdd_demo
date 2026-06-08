@@ -8,7 +8,7 @@ import numpy as np
 from .channel import MultipathChannel, impulse_response_to_grid
 from .config import ChannelConfig, ConventionalConfig, DemoConfig, NRPhyConfig, SemanticConfig
 from .conventional import H264LDPCImageCodec
-from .dsp import CompressedCSI, compress_csi, csi_nmse, decompress_csi
+from .dsp import CompressedCSI, compress_csi, compress_csi_delay_domain, csi_nmse, decompress_csi
 from .learned_estimator import LearnedChannelEstimator
 from .nodes import BaseStation, UserEquipment
 from .semantic import SwinJSCCInterface
@@ -105,7 +105,11 @@ class TDDPhysicalLayerSimulation:
         if channel_estimator == "comm_foundation":
             if not comm_foundation_checkpoint:
                 raise ValueError("comm_foundation estimator requires a checkpoint path.")
-            learned_estimator = LearnedChannelEstimator(comm_foundation_checkpoint)
+            learned_estimator = LearnedChannelEstimator(
+                comm_foundation_checkpoint,
+                phy_cfg,
+                time_average=channel_cfg.doppler_hz == 0.0,
+            )
         elif channel_estimator != "ls":
             raise ValueError("channel_estimator must be 'ls' or 'comm_foundation'.")
 
@@ -180,7 +184,7 @@ class TDDPhysicalLayerSimulation:
         comparable = min(recovered_bits.size, compressed.bitstream.size)
         bit_errors = int(np.sum(recovered_bits[:comparable] != compressed.bitstream[:comparable]))
         bit_errors += int(compressed.bitstream.size - comparable)
-        csi_quality = self._evaluate_csi_feedback(dl_rx.h_est, compressed, recovered_bits, bit_errors)
+        csi_quality = self._evaluate_csi_feedback(dl_rx.h_est, compressed, recovered_bits, bit_errors, h_true=h_true)
         ce_quality = {
             "estimator": self.channel_estimator,
             "h_est_nmse": float(csi_nmse(h_true, dl_rx.h_est)),
@@ -267,10 +271,26 @@ class TDDPhysicalLayerSimulation:
             self.ue.ul_mapper.data_re_per_slot(slot_idx)
             for slot_idx in range(self.phy_cfg.n_ul_slots)
         )
+        bits_per_tap = 2 * 8
+        n_taps = min(16, self.phy_cfg.n_fft)
+        bits_per_segment = n_taps * bits_per_tap
+        max_segments = capacity_bits // bits_per_segment
+        total_symbols = h_est.shape[0] * h_est.shape[-1]
+        if max_segments >= 1:
+            compressed = compress_csi_delay_domain(
+                h_est,
+                self.phy_cfg,
+                n_taps=n_taps,
+                bits_per_component=8,
+                time_segments=min(total_symbols, int(max_segments)),
+            )
+            compressed.metadata["ul_capacity_bits"] = int(capacity_bits)
+            return compressed
         for stride in range(4, self.phy_cfg.n_subcarriers + 1):
             compressed = compress_csi(h_est, subcarrier_stride=stride)
             if compressed.bitstream.size <= capacity_bits:
                 compressed.metadata["ul_capacity_bits"] = int(capacity_bits)
+                compressed.metadata["method"] = "frequency_stride"
                 return compressed
         raise ValueError(
             "Configured UL grid cannot carry even the most aggressively downsampled CSI."
@@ -282,11 +302,13 @@ class TDDPhysicalLayerSimulation:
         compressed: CompressedCSI,
         recovered_bits: np.ndarray,
         bit_errors: int,
+        h_true: ComplexArray | None = None,
     ) -> Dict[str, int | float]:
         ue_compressed_h = decompress_csi(compressed.bitstream, compressed.metadata)
         bs_recovered_h = decompress_csi(recovered_bits, compressed.metadata)
         total_bits = int(compressed.bitstream.size)
-        return {
+        quality = {
+            "feedback_method": str(compressed.metadata.get("method", "frequency_stride")),
             "feedback_bits": total_bits,
             "bs_received_bits": int(recovered_bits.size),
             "feedback_bit_errors": int(bit_errors),
@@ -296,6 +318,20 @@ class TDDPhysicalLayerSimulation:
             "bs_recovered_csi_nmse": float(csi_nmse(h_est, bs_recovered_h)),
             "bs_recovered_csi_nmse_db": float(10.0 * np.log10(max(csi_nmse(h_est, bs_recovered_h), 1e-30))),
         }
+        if h_true is not None:
+            quality.update(
+                {
+                    "ue_compression_true_nmse": float(csi_nmse(h_true, ue_compressed_h)),
+                    "ue_compression_true_nmse_db": float(
+                        10.0 * np.log10(max(csi_nmse(h_true, ue_compressed_h), 1e-30))
+                    ),
+                    "bs_recovered_true_csi_nmse": float(csi_nmse(h_true, bs_recovered_h)),
+                    "bs_recovered_true_csi_nmse_db": float(
+                        10.0 * np.log10(max(csi_nmse(h_true, bs_recovered_h), 1e-30))
+                    ),
+                }
+            )
+        return quality
 
     def _count_decoded_payload_errors(self, received_coded_bits: np.ndarray, payload_bits: np.ndarray) -> int:
         ldpc_input_bits = self.conventional_codec._majority_combine_repetitions(received_coded_bits)

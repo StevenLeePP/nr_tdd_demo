@@ -130,8 +130,10 @@ python run_demo.py \
     --channel rayleigh \
     --snr-db 20 \
     --channel-estimator comm_foundation \
-    --comm-foundation-checkpoint outputs/comm_foundation_ckpt_sanity/best_comm_foundation_channel_estimator.pt
+    --comm-foundation-checkpoint outputs/comm_foundation_ckpt_residual_safe/best_comm_foundation_channel_estimator.pt
 ```
+
+`comm_foundation` 路径采用保守增强策略：先用 LS 得到 `H_ls`，再根据通信结构做块静态 CSI 平滑，最后由零初始化 residual 复值网络输出修正量。弱 checkpoint 不会覆盖 LS 先验；训练充分时 residual head 可以继续学习更细的 CSI 修正。
 
 ### 通信基座模型数据集与训练
 
@@ -147,7 +149,7 @@ python scripts/export_comm_foundation_dataset.py \
 # 训练最小复值 backbone + 信道估计 head
 python scripts/train_comm_foundation_model.py \
     --dataset_path outputs/comm_foundation_sanity_100.npz \
-    --output_dir outputs/comm_foundation_ckpt_sanity \
+    --output_dir outputs/comm_foundation_ckpt_residual_safe \
     --epochs 1 \
     --batch_size 16 \
     --use_masked_csi \
@@ -235,8 +237,9 @@ H.264 视频编码 + LDPC 信道编码的传统图像传输方案：
 ### dsp.py — 数字信号处理
 
 - **ChannelEstimator**：LS 信道估计 + 频域线性插值 + 时域线性插值
-- **CSI 压缩**：频域降采样 + QPSK 量化，适配 UL 容量
-- **CSI 解压**：QPSK 解量化 + 频域升采样重建
+- **CSI 结构化去噪**：块静态场景下跨 OFDM 符号平均，降低导频 LS 噪声
+- **CSI 压缩**：优先使用 delay-domain sparse tap 压缩，频域降采样作为回退
+- **CSI 解压**：delay-domain tap 恢复或频域升采样重建
 
 ### nodes.py — 网络节点
 

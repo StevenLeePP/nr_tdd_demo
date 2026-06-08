@@ -41,6 +41,11 @@ class CSIDataset(Dataset):
         y = complex_np_to_channels(self.y[idx : idx + 1]).squeeze(0)
         return x, y
 
+    def subset_ls_nmse(self, indices: list[int]) -> float:
+        x = self.x[indices]
+        y = self.y[indices]
+        return float(np.mean(np.abs(x - y) ** 2) / max(float(np.mean(np.abs(y) ** 2)), 1e-30))
+
 
 def masked_input(x: torch.Tensor, mask_prob: float = 0.25) -> tuple[torch.Tensor, torch.Tensor]:
     mask = (torch.rand_like(x[:, :1]) < mask_prob).float()
@@ -111,6 +116,7 @@ def main() -> None:
     val_size = max(1, int(0.2 * len(dataset)))
     train_size = len(dataset) - val_size
     train_ds, val_ds = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(2026))
+    val_ls_nmse = dataset.subset_ls_nmse(list(val_ds.indices))
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size)
 
@@ -120,12 +126,31 @@ def main() -> None:
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     history = []
-    best_val = float("inf")
     best_path = output_dir / "best_comm_foundation_channel_estimator.pt"
+    initial_val = evaluate(model, val_loader, device)
+    best_val = initial_val
+    torch.save(model.checkpoint_payload(), best_path)
+    history.append(
+        {
+            "epoch": 0,
+            "train_loss": None,
+            "val_nmse": initial_val,
+            "ls_baseline_nmse": dataset.ls_nmse,
+            "val_ls_baseline_nmse": val_ls_nmse,
+            "note": "identity_safe_initialization",
+        }
+    )
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, args, device)
         val_nmse = evaluate(model, val_loader, device)
-        row = {"epoch": epoch, "train_loss": train_loss, "val_nmse": val_nmse, "ls_baseline_nmse": dataset.ls_nmse}
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_nmse": val_nmse,
+            "ls_baseline_nmse": dataset.ls_nmse,
+            "val_ls_baseline_nmse": val_ls_nmse,
+            "improvement_over_val_ls_nmse": val_ls_nmse - val_nmse,
+        }
         history.append(row)
         if val_nmse < best_val:
             best_val = val_nmse
@@ -139,6 +164,8 @@ def main() -> None:
         "best_val_nmse_db": 10.0 * np.log10(max(best_val, 1e-30)),
         "ls_baseline_nmse": dataset.ls_nmse,
         "ls_baseline_nmse_db": 10.0 * np.log10(max(dataset.ls_nmse, 1e-30)),
+        "val_ls_baseline_nmse": val_ls_nmse,
+        "val_ls_baseline_nmse_db": 10.0 * np.log10(max(val_ls_nmse, 1e-30)),
         "history": history,
     }
     (output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

@@ -64,6 +64,50 @@ class ChannelEstimator:
         raise ValueError("Equalizer method must be zf or mmse.")
 
 
+def delay_domain_denoise_csi(
+    h_est: ComplexArray,
+    cfg: NRPhyConfig,
+    n_taps: int | None = None,
+    time_average: bool = False,
+) -> ComplexArray:
+    """Apply communication-structured CSI denoising.
+
+    For block-static TDD frames, time averaging across OFDM symbols removes LS
+    pilot noise without changing the underlying channel. Optional delay-domain
+    truncation can then impose sparse TDL support when the active-band window is
+    wide enough for that prior to be helpful.
+    """
+    if n_taps is None:
+        n_taps = cfg.n_fft
+    if n_taps <= 0 or n_taps > cfg.n_fft:
+        raise ValueError("n_taps must be in [1, n_fft].")
+    h_est = np.asarray(h_est, dtype=np.complex128)
+    if h_est.ndim == 2:
+        h_est = h_est[None]
+        squeeze = True
+    elif h_est.ndim == 3:
+        squeeze = False
+    else:
+        raise ValueError("h_est must have shape [subcarrier, symbol] or [slot, subcarrier, symbol].")
+    if time_average:
+        mean_h = np.mean(h_est, axis=(0, 2), keepdims=True)
+        h_est = np.tile(mean_h, (h_est.shape[0], 1, h_est.shape[2]))
+    if n_taps >= cfg.n_fft:
+        return h_est[0] if squeeze else h_est
+
+    denoised = np.zeros_like(h_est)
+    for slot_idx in range(h_est.shape[0]):
+        for symbol_idx in range(h_est.shape[-1]):
+            spectrum = np.zeros(cfg.n_fft, dtype=np.complex128)
+            spectrum[cfg.active_fft_slice] = h_est[slot_idx, :, symbol_idx]
+            impulse = np.fft.ifft(np.fft.ifftshift(spectrum))
+            sparse_impulse = np.zeros_like(impulse)
+            sparse_impulse[:n_taps] = impulse[:n_taps]
+            restored = np.fft.fftshift(np.fft.fft(sparse_impulse))
+            denoised[slot_idx, :, symbol_idx] = restored[cfg.active_fft_slice]
+    return denoised[0] if squeeze else denoised
+
+
 @dataclass
 class CompressedCSI:
     bitstream: np.ndarray
@@ -102,6 +146,66 @@ def compress_csi(
     )
 
 
+def compress_csi_delay_domain(
+    h_est: ComplexArray,
+    cfg: NRPhyConfig,
+    n_taps: int = 16,
+    bits_per_component: int = 8,
+    time_segments: int = 1,
+) -> CompressedCSI:
+    """Sparse delay-domain CSI compression.
+
+    The NR-like simulator uses short TDL channels, so most channel energy is
+    concentrated in the first few delay taps. Feedbacking these taps is far
+    more efficient than sending a coarsely downsampled frequency grid.
+    """
+    if n_taps <= 0 or n_taps > cfg.n_fft:
+        raise ValueError("n_taps must be in [1, n_fft].")
+    if bits_per_component < 2 or bits_per_component > 8:
+        raise ValueError("bits_per_component should be in [2, 8].")
+    h_est = np.asarray(h_est, dtype=np.complex128)
+    if h_est.ndim != 3:
+        raise ValueError("h_est must have shape [slot, subcarrier, symbol].")
+
+    n_slots, n_subcarriers, n_symbols = h_est.shape
+    if n_subcarriers != cfg.n_subcarriers:
+        raise ValueError("h_est subcarrier dimension must match cfg.n_subcarriers.")
+    total_symbols = n_slots * n_symbols
+    time_segments = int(np.clip(time_segments, 1, total_symbols))
+
+    flattened = np.transpose(h_est, (0, 2, 1)).reshape(total_symbols, n_subcarriers)
+    segment_edges = np.linspace(0, total_symbols, time_segments + 1, dtype=int)
+    taps = np.zeros((time_segments, n_taps), dtype=np.complex128)
+    for segment_idx in range(time_segments):
+        start, end = segment_edges[segment_idx], segment_edges[segment_idx + 1]
+        segment_h = np.mean(flattened[start:end], axis=0)
+        spectrum = np.zeros(cfg.n_fft, dtype=np.complex128)
+        spectrum[cfg.active_fft_slice] = segment_h
+        impulse = np.fft.ifft(np.fft.ifftshift(spectrum))
+        taps[segment_idx] = impulse[:n_taps]
+
+    components = np.concatenate([np.real(taps).reshape(-1), np.imag(taps).reshape(-1)])
+    scale = float(np.percentile(np.abs(components), 99.5))
+    scale = max(scale, 1e-8)
+    levels = (1 << bits_per_component) - 1
+    normalized = np.clip((components / scale + 1.0) * 0.5, 0.0, 1.0)
+    quantized = np.rint(normalized * levels).astype(np.uint8)
+    return CompressedCSI(
+        bitstream=int_array_to_bits(quantized, bits_per_component),
+        metadata={
+            "method": "delay_domain",
+            "original_shape": tuple(int(x) for x in h_est.shape),
+            "n_fft": int(cfg.n_fft),
+            "active_start": int(cfg.active_fft_slice.start),
+            "active_stop": int(cfg.active_fft_slice.stop),
+            "n_taps": int(n_taps),
+            "time_segments": int(time_segments),
+            "bits_per_component": int(bits_per_component),
+            "scale": scale,
+        },
+    )
+
+
 def bits_to_int_array(bits: np.ndarray, bits_per_value: int, count: int) -> np.ndarray:
     bits = np.asarray(bits, dtype=np.uint8).reshape(-1)
     needed = count * bits_per_value
@@ -114,6 +218,9 @@ def bits_to_int_array(bits: np.ndarray, bits_per_value: int, count: int) -> np.n
 
 def decompress_csi(bitstream: np.ndarray, metadata: Dict[str, object]) -> ComplexArray:
     """Reconstruct a full-size CSI matrix from the fallback compressed bitstream."""
+    if metadata.get("method") == "delay_domain":
+        return decompress_csi_delay_domain(bitstream, metadata)
+
     original_shape = tuple(int(x) for x in metadata["original_shape"])
     compressed_shape = tuple(int(x) for x in metadata["compressed_shape"])
     stride = int(metadata["subcarrier_stride"])
@@ -141,6 +248,38 @@ def decompress_csi(bitstream: np.ndarray, metadata: Dict[str, object]) -> Comple
                     all_subcarriers, src_positions, np.real(known)
                 ) + 1j * np.interp(all_subcarriers, src_positions, np.imag(known))
     return h_full
+
+
+def decompress_csi_delay_domain(bitstream: np.ndarray, metadata: Dict[str, object]) -> ComplexArray:
+    original_shape = tuple(int(x) for x in metadata["original_shape"])
+    n_fft = int(metadata["n_fft"])
+    active_start = int(metadata["active_start"])
+    active_stop = int(metadata["active_stop"])
+    n_taps = int(metadata["n_taps"])
+    time_segments = int(metadata["time_segments"])
+    bits_per_component = int(metadata["bits_per_component"])
+    scale = float(metadata["scale"])
+
+    component_count = time_segments * n_taps
+    quantized = bits_to_int_array(bitstream, bits_per_component, 2 * component_count)
+    levels = (1 << bits_per_component) - 1
+    values = ((quantized.astype(np.float64) / levels) * 2.0 - 1.0) * scale
+    real = values[:component_count].reshape(time_segments, n_taps)
+    imag = values[component_count:].reshape(time_segments, n_taps)
+    taps = real + 1j * imag
+
+    n_slots, n_subcarriers, n_symbols = original_shape
+    total_symbols = n_slots * n_symbols
+    segment_edges = np.linspace(0, total_symbols, time_segments + 1, dtype=int)
+    flattened = np.zeros((total_symbols, n_subcarriers), dtype=np.complex128)
+    for segment_idx in range(time_segments):
+        impulse = np.zeros(n_fft, dtype=np.complex128)
+        impulse[:n_taps] = taps[segment_idx]
+        spectrum = np.fft.fftshift(np.fft.fft(impulse))
+        active_h = spectrum[active_start:active_stop]
+        start, end = segment_edges[segment_idx], segment_edges[segment_idx + 1]
+        flattened[start:end] = active_h
+    return flattened.reshape(n_slots, n_symbols, n_subcarriers).transpose(0, 2, 1)
 
 
 def csi_nmse(reference: ComplexArray, estimate: ComplexArray) -> float:

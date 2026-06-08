@@ -13,6 +13,7 @@ class CommFoundationConfig:
     in_complex_channels: int = 1
     hidden_complex_channels: int = 16
     depth: int = 4
+    residual_scale: float = 1.0
 
 
 class ComplexCommunicationBackbone(nn.Module):
@@ -39,11 +40,18 @@ class ComplexCommunicationBackbone(nn.Module):
 
 
 class ChannelEstimationHead(nn.Module):
-    """Maps Z_comm to H_hat with shape [B, 2, F, T]."""
+    """Maps Z_comm to a residual channel correction with shape [B, 2, F, T]."""
 
-    def __init__(self, in_complex_channels: int):
+    def __init__(self, in_complex_channels: int, zero_init: bool = True):
         super().__init__()
         self.proj = ComplexConv2d(in_complex_channels, 1, kernel_size=1, padding=0)
+        if zero_init:
+            nn.init.zeros_(self.proj.real.weight)
+            nn.init.zeros_(self.proj.imag.weight)
+            if self.proj.real.bias is not None:
+                nn.init.zeros_(self.proj.real.bias)
+            if self.proj.imag.bias is not None:
+                nn.init.zeros_(self.proj.imag.bias)
 
     def forward(self, z_comm: torch.Tensor) -> torch.Tensor:
         return self.proj(z_comm)
@@ -93,6 +101,11 @@ class CommFoundationChannelEstimator(nn.Module):
         self.semantic_assist_head = SemanticAssistHead(self.backbone.out_complex_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z_comm = self.backbone(x)
+        residual = self.channel_head(z_comm)
+        return x[:, :2] + float(self.cfg.residual_scale) * residual
+
+    def residual(self, x: torch.Tensor) -> torch.Tensor:
         z_comm = self.backbone(x)
         return self.channel_head(z_comm)
 

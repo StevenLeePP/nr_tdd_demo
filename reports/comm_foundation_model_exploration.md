@@ -88,6 +88,14 @@ Implemented:
 - `ComplexLayerNorm`
 - `ComplexCommunicationBackbone`
 
+The estimator is now residual-safe:
+
+```text
+H_hat = H_structured + ComplexResidualHead(Z_comm)
+```
+
+`H_structured` is the LS estimate after optional communication-structured smoothing. The residual head is zero-initialized, so an untrained or undertrained checkpoint starts as a non-destructive estimator instead of overwriting LS with random complex features.
+
 The output latent is:
 
 ```text
@@ -139,7 +147,7 @@ New script:
 ```bash
 python scripts/train_comm_foundation_model.py \
   --dataset_path outputs/comm_foundation_sanity_100.npz \
-  --output_dir outputs/comm_foundation_ckpt_sanity \
+  --output_dir outputs/comm_foundation_ckpt_residual_safe \
   --epochs 1 \
   --batch_size 16 \
   --lr 0.001 \
@@ -155,13 +163,9 @@ L_pretrain = lambda_ce * L_channel_estimation
            + lambda_denoise * L_denoising_csi
 ```
 
-The 1-epoch sanity run produced:
+The training loop saves the epoch-0 identity-safe checkpoint before optimization, then only replaces it when validation NMSE improves under the same PyTorch validation metric. This prevents weak checkpoints from blindly replacing LS in the equalizer. The current local checkpoint used for end-to-end validation is:
 
-- Validation model NMSE: `0.1789`
-- LS baseline NMSE: `0.0451`
-- Checkpoint: `outputs/comm_foundation_ckpt_sanity/best_comm_foundation_channel_estimator.pt`
-
-This is not expected to beat LS yet; it verifies the training and checkpoint loop.
+- `outputs/comm_foundation_ckpt_residual_safe/best_comm_foundation_channel_estimator.pt`
 
 ## 8. Optional Simulation Integration
 
@@ -176,17 +180,26 @@ The learned estimator path is optional:
 ```bash
 python run_demo.py \
   --channel-estimator comm_foundation \
-  --comm-foundation-checkpoint outputs/comm_foundation_ckpt_sanity/best_comm_foundation_channel_estimator.pt
+  --comm-foundation-checkpoint outputs/comm_foundation_ckpt_residual_safe/best_comm_foundation_channel_estimator.pt
 ```
 
 When enabled:
 
 1. UE still computes `H_ls_grid` from pilots.
-2. `LearnedChannelEstimator` maps `H_ls_grid` to `H_hat`.
-3. `H_hat` replaces LS interpolation for equalization.
-4. SwinJSCC decoder remains unchanged.
-5. Logs include channel-estimation NMSE and semantic EVM.
-6. If the learned estimator path is used, logs include model inference time in milliseconds.
+2. For block-static frames (`doppler_hz=0`), `LearnedChannelEstimator` first averages CSI across OFDM symbols in a slot, using the TDD channel coherence prior.
+3. The complex residual model maps the structured estimate to `H_hat`.
+4. `H_hat` replaces LS interpolation for equalization.
+5. SwinJSCC decoder remains unchanged.
+6. Logs include channel-estimation NMSE and semantic EVM.
+7. If the learned estimator path is used, logs include model inference time in milliseconds.
+
+CSI feedback now prefers sparse delay-domain compression when it fits the UL capacity:
+
+```text
+H_est → delay-domain taps over time segments → scalar quantization → UL QPSK feedback
+```
+
+The old frequency-stride feedback remains as a fallback.
 
 ## 9. Initial Results
 
@@ -195,14 +208,22 @@ With LS estimator, Rayleigh, 20 dB:
 - SwinJSCC PSNR: about `28.10 dB`
 - H.264+LDPC PSNR: about `34.16 dB`
 - Channel-estimation NMSE: about `-24.17 dB`
-- BS recovered CSI NMSE after compressed feedback: about `-5.19 dB`
+- BS recovered CSI NMSE after delay-domain feedback: about `-11.69 dB`
 
-With the 1-epoch sanity foundation checkpoint:
+With the residual-safe foundation checkpoint plus block-static CSI smoothing:
 
-- SwinJSCC PSNR dropped to about `20.65 dB`
-- Channel-estimation NMSE was about `-5.13 dB`
+- SwinJSCC PSNR improved slightly to about `28.17 dB`
+- Channel-estimation NMSE improved to about `-35.62 dB`
+- BS recovered CSI NMSE after delay-domain feedback was about `-11.91 dB`
 
-Interpretation: the checkpoint only proves integration. It is not a meaningful pretrained foundation model yet.
+Interpretation: the first useful gain comes from combining communication structure with the complex residual model interface. The neural residual itself still needs larger pretraining to become a standalone learned improvement, but the deployed `comm_foundation` path is no longer destructive and now improves channel estimation, feedback, and semantic reconstruction on the default Rayleigh 20 dB scenario.
+
+Additional Rayleigh 10 dB validation:
+
+| Estimator | SwinJSCC PSNR | CE NMSE | Semantic EVM | BS CSI NMSE |
+|---|---:|---:|---:|---:|
+| LS | `27.30 dB` | `-14.17 dB` | `-8.21 dB` | `-5.54 dB` |
+| comm_foundation | `27.57 dB` | `-25.66 dB` | `-9.63 dB` | `-5.88 dB` |
 
 ## 10. Next Steps
 
