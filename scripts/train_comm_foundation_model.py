@@ -16,6 +16,8 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1]
 PACKAGE_PARENT = PACKAGE_DIR.parent
 sys.path.insert(0, str(PACKAGE_PARENT))
 
+from nr_tdd_semantic.config import NRPhyConfig  # noqa: E402
+from nr_tdd_semantic.dsp import delay_domain_denoise_csi  # noqa: E402
 from nr_tdd_semantic.models.comm_foundation_model import (  # noqa: E402
     CommFoundationChannelEstimator,
     CommFoundationConfig,
@@ -25,11 +27,21 @@ from nr_tdd_semantic.models.comm_foundation_model import (  # noqa: E402
 
 
 class CSIDataset(Dataset):
-    def __init__(self, dataset_path: str):
+    def __init__(self, dataset_path: str, input_estimate: str = "ls", n_fft: int = 128, time_average: bool = True):
         data = np.load(dataset_path)
         h_ls = data["H_ls_grid"].astype(np.complex64)
         h_true = data["H_true"].astype(np.complex64)
-        self.x = h_ls.reshape(-1, *h_ls.shape[-2:])
+        h_ls = h_ls.reshape(-1, *h_ls.shape[-2:])
+        if input_estimate == "ls":
+            self.x = h_ls
+        elif input_estimate == "ls_smoothing":
+            phy_cfg = NRPhyConfig(n_fft=n_fft, n_subcarriers=h_ls.shape[-2], n_dl_slots=1, n_ul_slots=1)
+            self.x = np.stack(
+                [delay_domain_denoise_csi(sample, phy_cfg, time_average=time_average) for sample in h_ls],
+                axis=0,
+            ).astype(np.complex64)
+        else:
+            raise ValueError("input_estimate must be 'ls' or 'ls_smoothing'.")
         self.y = h_true.reshape(-1, *h_true.shape[-2:])
         self.ls_nmse = float(np.mean(np.abs(self.x - self.y) ** 2) / max(float(np.mean(np.abs(self.y) ** 2)), 1e-30))
 
@@ -160,6 +172,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reliability_tau", type=float, default=0.01)
     parser.add_argument("--hidden_channels", type=int, default=16)
     parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--input_estimate", choices=("ls", "ls_smoothing"), default="ls")
+    parser.add_argument("--n_fft", type=int, default=128)
+    parser.add_argument("--time_average", action="store_true", default=True)
+    parser.add_argument("--no_time_average", dest="time_average", action="store_false")
     return parser
 
 
@@ -167,7 +183,12 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    dataset = CSIDataset(args.dataset_path)
+    dataset = CSIDataset(
+        args.dataset_path,
+        input_estimate=args.input_estimate,
+        n_fft=args.n_fft,
+        time_average=args.time_average,
+    )
     if not (0.0 < args.sample_fraction <= 1.0):
         raise ValueError("--sample_fraction must be in (0, 1].")
     base_indices = np.arange(len(dataset))
@@ -243,6 +264,7 @@ def main() -> None:
         "checkpoint": str(best_path),
         "training_strategy": args.training_strategy,
         "sample_fraction": args.sample_fraction,
+        "input_estimate": args.input_estimate,
         "used_samples": used_count,
         "best_val_nmse": best_val,
         "best_val_nmse_db": 10.0 * np.log10(max(best_val, 1e-30)),

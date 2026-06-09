@@ -32,6 +32,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ul-slots", type=int, default=1)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--metrics-input", default="", help="Reuse an existing metrics.csv and only regenerate summary/gain files.")
     return parser
 
 
@@ -201,6 +202,29 @@ def summarize_gains(gain_rows: list[dict]) -> list[dict]:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    if args.metrics_input:
+        with Path(args.metrics_input).open("r", newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        numeric_fields = {
+            "snr_db",
+            "doppler_hz",
+            "pilot_spacing",
+            "semantic_psnr_db",
+            "ce_nmse_db",
+            "semantic_evm_db",
+            "bs_csi_nmse_db",
+            "bs_true_csi_nmse_db",
+            "estimator_runtime_ms",
+        }
+        for row in rows:
+            for key in numeric_fields:
+                if key in row and row[key] != "":
+                    row[key] = float(row[key])
+            if "pilot_spacing" in row:
+                row["pilot_spacing"] = int(row["pilot_spacing"])
+        write_outputs(rows, Path(args.output_dir))
+        print(json.dumps({"cases": len(rows), "output_dir": args.output_dir, "metrics_input": args.metrics_input}, indent=2))
+        return
     estimators = parse_list(args.estimators, str)
     snrs = parse_list(args.snrs, float)
     dopplers = parse_list(args.dopplers, float)

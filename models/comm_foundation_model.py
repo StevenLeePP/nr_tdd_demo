@@ -96,6 +96,7 @@ class CommFoundationChannelEstimator(nn.Module):
         self.cfg = cfg
         self.backbone = ComplexCommunicationBackbone(cfg)
         self.channel_head = ChannelEstimationHead(self.backbone.out_complex_channels)
+        self.residual_scale_param = nn.Parameter(torch.tensor(float(cfg.residual_scale)))
         self.csi_feedback_head = CSIFeedbackHead(self.backbone.out_complex_channels)
         self.reliability_head = ReliabilityHead(self.backbone.out_complex_channels)
         self.semantic_assist_head = SemanticAssistHead(self.backbone.out_complex_channels)
@@ -103,7 +104,7 @@ class CommFoundationChannelEstimator(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z_comm = self.backbone(x)
         residual = self.channel_head(z_comm)
-        return x[:, :2] + float(self.cfg.residual_scale) * residual
+        return x[:, :2] + self.residual_scale_param * residual
 
     def residual(self, x: torch.Tensor) -> torch.Tensor:
         z_comm = self.backbone(x)
