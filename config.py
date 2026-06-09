@@ -27,6 +27,7 @@ class NRPhyConfig:
     cell_id: int = 42
     snr_db: float = 20.0
     rng_seed: int = 7
+    pilot_spacing: int = 4
 
     def __post_init__(self) -> None:
         if self.symbols_per_slot != 14:
@@ -39,6 +40,8 @@ class NRPhyConfig:
             raise ValueError("n_subcarriers should be even for centered mapping.")
         if self.scs_khz not in {15, 30, 60, 120, 240}:
             raise ValueError("Use an NR SCS value: 15, 30, 60, 120, or 240 kHz.")
+        if self.pilot_spacing <= 0:
+            raise ValueError("pilot_spacing must be positive.")
 
     @property
     def subcarrier_spacing_hz(self) -> float:

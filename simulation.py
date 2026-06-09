@@ -22,6 +22,17 @@ from .visualization import (
 )
 
 
+ESTIMATOR_ALIASES = {
+    "comm_foundation": "comm_foundation_trained",
+}
+ESTIMATOR_MODES = {
+    "ls",
+    "ls_smoothing",
+    "comm_foundation_untrained",
+    "comm_foundation_trained",
+}
+
+
 @dataclass
 class SimulationResult:
     reconstructed: object
@@ -87,7 +98,9 @@ class TDDPhysicalLayerSimulation:
         self.semantic_cfg = semantic_cfg
         self.conventional_cfg = conventional_cfg
         self.demo_cfg = demo_cfg
-        self.channel_estimator = channel_estimator
+        self.channel_estimator = ESTIMATOR_ALIASES.get(channel_estimator, channel_estimator)
+        if self.channel_estimator not in ESTIMATOR_MODES:
+            raise ValueError(f"channel_estimator must be one of {sorted(ESTIMATOR_MODES)}.")
         self.output_paths = build_output_paths(
             self.demo_cfg.output_dir,
             self.channel_cfg.channel_type,
@@ -102,16 +115,30 @@ class TDDPhysicalLayerSimulation:
         )
         self.conventional_codec = H264LDPCImageCodec(conventional_cfg)
         learned_estimator = None
-        if channel_estimator == "comm_foundation":
+        use_time_average = channel_cfg.doppler_hz == 0.0
+        if self.channel_estimator == "ls_smoothing":
+            learned_estimator = LearnedChannelEstimator(
+                None,
+                phy_cfg,
+                time_average=use_time_average,
+                use_neural_model=False,
+            )
+        elif self.channel_estimator == "comm_foundation_untrained":
+            learned_estimator = LearnedChannelEstimator(
+                None,
+                phy_cfg,
+                time_average=use_time_average,
+                use_neural_model=True,
+            )
+        elif self.channel_estimator == "comm_foundation_trained":
             if not comm_foundation_checkpoint:
-                raise ValueError("comm_foundation estimator requires a checkpoint path.")
+                raise ValueError("comm_foundation_trained estimator requires a checkpoint path.")
             learned_estimator = LearnedChannelEstimator(
                 comm_foundation_checkpoint,
                 phy_cfg,
-                time_average=channel_cfg.doppler_hz == 0.0,
+                time_average=use_time_average,
+                use_neural_model=True,
             )
-        elif channel_estimator != "ls":
-            raise ValueError("channel_estimator must be 'ls' or 'comm_foundation'.")
 
         self.bs = BaseStation(phy_cfg, self.codec)
         self.ue = UserEquipment(phy_cfg, self.codec, learned_estimator=learned_estimator)

@@ -69,7 +69,7 @@ class CSIFeedbackHead(nn.Module):
 
 
 class ReliabilityHead(nn.Module):
-    """Placeholder reliability-map head for future semantic protection."""
+    """Predict a [0, 1] time-frequency reliability map aligned with the grid."""
 
     def __init__(self, in_complex_channels: int):
         super().__init__()

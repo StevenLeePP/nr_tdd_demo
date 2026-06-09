@@ -22,29 +22,39 @@ class LearnedChannelEstimator:
 
     def __init__(
         self,
-        checkpoint_path: str,
+        checkpoint_path: str | None,
         phy_cfg: NRPhyConfig,
         device: str | None = None,
         use_delay_denoise: bool = True,
         delay_denoise_taps: int | None = None,
         time_average: bool = False,
+        use_neural_model: bool = True,
     ) -> None:
-        if not Path(checkpoint_path).exists():
+        if checkpoint_path is not None and not Path(checkpoint_path).exists():
             raise FileNotFoundError(checkpoint_path)
         self.phy_cfg = phy_cfg
         self.use_delay_denoise = use_delay_denoise
         self.delay_denoise_taps = delay_denoise_taps
         self.time_average = time_average
+        self.use_neural_model = use_neural_model
         self.device = torch.device(device or ("cuda:0" if torch.cuda.is_available() else "cpu"))
-        payload = torch.load(checkpoint_path, map_location=self.device)
-        cfg = CommFoundationConfig(**payload["model_config"])
+        if checkpoint_path is not None:
+            payload = torch.load(checkpoint_path, map_location=self.device)
+            cfg = CommFoundationConfig(**payload["model_config"])
+        else:
+            payload = None
+            cfg = CommFoundationConfig()
         self.model = CommFoundationChannelEstimator(cfg).to(self.device)
-        self.model.load_state_dict(payload["state_dict"], strict=False)
+        if payload is not None:
+            self.model.load_state_dict(payload["state_dict"], strict=False)
         self.model.eval()
         self.last_inference_time_ms = 0.0
 
     @torch.no_grad()
     def predict(self, h_ls_grid: ComplexArray) -> ComplexArray:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        start = time.perf_counter()
         h_input = np.asarray(h_ls_grid, dtype=np.complex128)
         if self.use_delay_denoise:
             h_input = delay_domain_denoise_csi(
@@ -53,10 +63,10 @@ class LearnedChannelEstimator:
                 n_taps=self.delay_denoise_taps,
                 time_average=self.time_average,
             )
+        if not self.use_neural_model:
+            self.last_inference_time_ms = (time.perf_counter() - start) * 1000.0
+            return h_input.astype(np.complex128)
         x = complex_np_to_channels(np.asarray(h_input, dtype=np.complex64)[None]).to(self.device)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-        start = time.perf_counter()
         pred = self.model(x)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)

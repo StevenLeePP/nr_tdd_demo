@@ -29,11 +29,13 @@ def parse_float_list(text: str) -> tuple[float, ...]:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the modular NR TDD SwinJSCC PHY demo.")
     parser.add_argument("--image", default=DemoConfig().image_path, help="Input image path.")
+    parser.add_argument("--output-dir", default=str(DemoConfig().output_dir), help="Directory for run artifacts.")
     parser.add_argument("--scs-khz", type=int, default=15, help="Subcarrier spacing in kHz.")
     parser.add_argument("--n-fft", type=int, default=1024, help="OFDM FFT size.")
     parser.add_argument("--n-subcarriers", type=int, default=600, help="Number of active subcarriers.")
     parser.add_argument("--dl-slots", type=int, default=72, help="Number of downlink slots.")
     parser.add_argument("--ul-slots", type=int, default=2, help="Number of uplink slots.")
+    parser.add_argument("--pilot-spacing", type=int, default=4, help="Comb pilot spacing in subcarriers.")
     parser.add_argument("--snr-db", type=float, default=20.0, help="Target AWGN SNR in dB.")
     parser.add_argument(
         "--channel",
@@ -55,7 +57,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--h264-crf", type=int, default=28, help="H.264 CRF for the conventional branch.")
     parser.add_argument(
         "--channel-estimator",
-        choices=("ls", "comm_foundation"),
+        choices=("ls", "ls_smoothing", "comm_foundation_untrained", "comm_foundation_trained", "comm_foundation"),
         default="ls",
         help="Channel estimator used at the UE equalizer.",
     )
@@ -77,6 +79,7 @@ def main() -> None:
         n_ul_slots=args.ul_slots,
         snr_db=args.snr_db,
         rng_seed=args.seed,
+        pilot_spacing=args.pilot_spacing,
     )
     channel_cfg = ChannelConfig(
         channel_type=args.channel,
@@ -87,7 +90,7 @@ def main() -> None:
     )
     semantic_cfg = SemanticConfig(use_real_swinjscc=args.semantic == "swinjscc")
     conventional_cfg = ConventionalConfig(h264_crf=args.h264_crf)
-    demo_cfg = DemoConfig(image_path=args.image)
+    demo_cfg = DemoConfig(image_path=args.image, output_dir=Path(args.output_dir))
 
     output_paths = build_output_paths(
         demo_cfg.output_dir,

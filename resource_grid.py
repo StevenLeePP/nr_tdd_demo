@@ -24,10 +24,11 @@ class ResourceGridMapper:
         mask = np.zeros((self.cfg.n_subcarriers, self.cfg.symbols_per_slot), dtype=bool)
         subcarrier_idx = np.arange(self.cfg.n_subcarriers)
         for symbol_idx in self.pilot_symbols:
-            # Comb structure in every OFDM symbol. One pilot RE appears every
-            # four subcarriers, so the data:pilot RE ratio is 3:1.
-            shift = (symbol_idx + slot_idx) % 4
-            mask[:, symbol_idx] = ((subcarrier_idx + shift) % 4) == 0
+            # Comb structure in every OFDM symbol. The default spacing is 4,
+            # which gives the requested data:pilot RE ratio of 3:1.
+            spacing = self.cfg.pilot_spacing
+            shift = (symbol_idx + slot_idx) % spacing
+            mask[:, symbol_idx] = ((subcarrier_idx + shift) % spacing) == 0
         return mask
 
     def data_mask_for_slot(self, slot_idx: int) -> np.ndarray:
