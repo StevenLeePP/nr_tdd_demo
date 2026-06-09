@@ -140,6 +140,7 @@ def write_outputs(rows: list[dict], output_dir: Path) -> None:
                 "",
                 "- `comm_foundation_trained` 相对 `ls_smoothing` 的平均收益见上表；如果 CE/PSNR/EVM 增益接近 0，说明当前 residual 还没有超过结构先验。",
                 "- `comm_foundation_trained` 相对 `comm_foundation_untrained` 的收益可用于判断 checkpoint 是否学到了非零修正。",
+                "- CE/EVM/BS CSI gain 采用 baseline - estimator，因此正数表示 NMSE/EVM 更低；PSNR gain 采用 estimator - baseline，正数表示图像质量更高。",
                 "- runtime delta 用于判断 trained residual 的推理开销是否值得。"
             ]
         )
@@ -169,10 +170,10 @@ def compute_gain_rows(rows: list[dict]) -> list[dict]:
                     "snr_db": row["snr_db"],
                     "doppler_hz": row["doppler_hz"],
                     "pilot_spacing": row["pilot_spacing"],
-                    "ce_nmse_gain_db": row["ce_nmse_db"] - base["ce_nmse_db"],
+                    "ce_nmse_gain_db": base["ce_nmse_db"] - row["ce_nmse_db"],
                     "psnr_gain_db": row["semantic_psnr_db"] - base["semantic_psnr_db"],
-                    "evm_gain_db": row["semantic_evm_db"] - base["semantic_evm_db"],
-                    "bs_csi_gain_db": row["bs_csi_nmse_db"] - base["bs_csi_nmse_db"],
+                    "evm_gain_db": base["semantic_evm_db"] - row["semantic_evm_db"],
+                    "bs_csi_gain_db": base["bs_csi_nmse_db"] - row["bs_csi_nmse_db"],
                     "runtime_delta_ms": row["estimator_runtime_ms"] - base["estimator_runtime_ms"],
                 }
             )

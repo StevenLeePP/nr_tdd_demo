@@ -1,4 +1,4 @@
-# v3 复值通信基座模型系统实验计划与结果汇总
+# 复值通信基座模型系统实验计划与结果汇总
 
 ## 1. 实验目的
 
@@ -30,11 +30,13 @@
 - `comm_foundation_trained` vs `ls_smoothing`
 - `comm_foundation_trained` vs `comm_foundation_untrained`
 
-当前状态：脚本已支持 gain 统计，完整大网格尚未运行。
+当前状态：脚本已支持 gain 统计，并输出 `gain_vs_baselines.csv`。完整大网格尚未运行。
+
+说明：`gain_vs_baselines.csv` 中 CE/EVM/BS CSI gain 使用 `baseline - estimator`，正数表示误差更低；PSNR gain 使用 `estimator - baseline`，正数表示图像质量更高。
 
 ## 3. Checkpoint 诊断结果
 
-计划新增 `scripts/diagnose_comm_foundation_checkpoint.py`，用于检查：
+已新增 `scripts/diagnose_comm_foundation_checkpoint.py`，用于检查：
 
 - residual 输出均值、方差、最大值、L2 norm；
 - `H_hat` 与 `H_structured` 的差值 NMSE；
@@ -42,7 +44,30 @@
 - `Z_comm` 的均值和方差；
 - 同一 batch 上的 `ls_smoothing`、`comm_foundation_untrained`、`comm_foundation_trained` NMSE。
 
-当前状态：待实现。
+示例：
+
+```bash
+python scripts/diagnose_comm_foundation_checkpoint.py \
+  --checkpoint outputs/comm_foundation_ckpt_residual_safe/best_comm_foundation_channel_estimator.pt \
+  --dataset_path outputs/comm_foundation_sanity_100.npz \
+  --output_dir outputs/checkpoint_diagnostics
+```
+
+输出：
+
+- `checkpoint_diagnostics.json`
+- `checkpoint_diagnostics.md`
+
+当前状态：脚本已实现，待对正式 Dataset-V1 checkpoint 运行。
+
+当前 sanity checkpoint 诊断结果：
+
+- trained residual L2 norm：`0`
+- `H_hat` vs `H_structured` NMSE：`0`
+- `ls_smoothing`、`comm_foundation_untrained`、`comm_foundation_trained` 在同一 batch 上 NMSE 相同
+- trained checkpoint 与 untrained 模型存在 backbone 参数差异，但 `channel_head` residual 参数仍为 0
+
+解释：当前 checkpoint 已加载成功，但 residual head 没有学到非零修正；这解释了小网格中 trained 与 untrained 输出一致的问题。
 
 ## 4. Dataset-V1 训练结果
 
@@ -75,12 +100,23 @@ python scripts/export_comm_foundation_dataset.py \
 - `0.10`
 - `1.0`
 
-输出：
+已新增 `scripts/run_training_comparison.py`，统一运行三种策略和四个样本比例，并输出：
 
 - `outputs/training_comparison/training_results.csv`
 - `outputs/training_comparison/training_summary.md`
 
-当前状态：训练脚本已支持三种策略、少样本比例和 held-out eval；正式 Dataset-V1 大规模训练尚未运行。
+示例：
+
+```bash
+python scripts/run_training_comparison.py \
+  --dataset_dir outputs/dataset_v1 \
+  --output_dir outputs/training_comparison \
+  --use_reliability
+```
+
+当前状态：训练脚本已支持三种策略、少样本比例和 held-out eval；训练对比汇总脚本已实现；正式 Dataset-V1 大规模训练尚未运行。
+
+补充：`run_training_comparison.py` 已填充 `ls_smoothing_baseline_nmse_db` 字段，便于直接比较神经 residual 相对结构先验的净收益。
 
 ## 5. 少样本和 Held-Out 泛化结果
 
@@ -103,11 +139,11 @@ python scripts/export_comm_foundation_dataset.py \
 
 ## 6. ReliabilityHead 结果
 
-当前训练脚本已支持 `--use_reliability`，需要进一步新增独立评估脚本：
+当前训练脚本已支持 `--use_reliability`，并已新增独立评估脚本：
 
 - `scripts/evaluate_reliability_head.py`
 
-计划输出：
+输出：
 
 - `reliability_metrics.csv`
 - 可选 reliability heatmap
@@ -120,7 +156,25 @@ python scripts/export_comm_foundation_dataset.py \
 - `high_low_error_ratio`
 - `reliability_target_mse`
 
-当前状态：训练脚本已有最小 ReliabilityHead loss 和评估字段；独立评估脚本待实现。
+示例：
+
+```bash
+python scripts/evaluate_reliability_head.py \
+  --checkpoint outputs/ckpt_pretrain_5pct/best_comm_foundation_channel_estimator.pt \
+  --dataset_paths outputs/dataset_v1/val.npz,outputs/dataset_v1/test_unseen_doppler.npz \
+  --output_dir outputs/reliability_eval \
+  --save_heatmaps 4
+```
+
+当前状态：训练脚本已有最小 ReliabilityHead loss 和评估字段；独立评估脚本已实现，待正式 checkpoint 运行。
+
+sanity checkpoint 上的 smoke test 结果：
+
+- `reliability_error_corr`：约 `-0.051`
+- `high_low_error_ratio`：约 `0.71`
+- `reliability_target_mse`：约 `0.151`
+
+解释：脚本链路可用，但该 checkpoint 并非专门训练过的可靠性模型，不能据此证明 ReliabilityHead 已稳定可用。
 
 ## 7. 端到端语义链路复测
 
@@ -140,12 +194,20 @@ python scripts/export_comm_foundation_dataset.py \
 - `comm_foundation_untrained`
 - `comm_foundation_trained`
 
-输出：
+已新增 `scripts/run_end_to_end_retest.py`，输出：
 
 - `end_to_end_metrics.csv`
 - `end_to_end_summary.md`
 
-当前状态：待正式 checkpoint 训练完成后复测。
+示例：
+
+```bash
+python scripts/run_end_to_end_retest.py \
+  --checkpoint outputs/ckpt_pretrain_5pct/best_comm_foundation_channel_estimator.pt \
+  --output_dir outputs/end_to_end_retest
+```
+
+当前状态：复测脚本已实现，待正式 checkpoint 训练完成后运行。
 
 ## 8. Go / No-Go 判断
 
@@ -168,8 +230,8 @@ No-Go 条件：
 
 ## 9. 下一步建议
 
-1. 实现 checkpoint 诊断脚本，先确认 trained residual 是否真的非零。
+1. 运行 checkpoint 诊断脚本，先确认 trained residual 是否真的非零。
 2. 运行中等规模 Dataset-V1，并完成三种训练策略和四个样本比例的对比。
-3. 实现 ReliabilityHead 独立评估脚本。
+3. 运行 ReliabilityHead 独立评估脚本。
 4. 使用最优 checkpoint 进行端到端语义链路复测。
 5. 根据 Go / No-Go 条件判断是否进入 Complex Transformer 阶段。
