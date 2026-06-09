@@ -59,7 +59,7 @@ class MultipathChannel:
         )
 
     def sample_impulse_response(self) -> ComplexArray:
-        if self.cfg.is_mimo:
+        if self.cfg.num_tx_antennas > 1 or self.cfg.num_rx_antennas > 1:
             return self.sample_mimo_impulse_response()
         if self.channel_type == "awgn":
             return np.array([1.0 + 0.0j], dtype=np.complex128)

@@ -40,6 +40,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-rx-antennas", type=int, default=1, help="Number of UE receive antennas.")
     parser.add_argument("--array-type", default="ula", choices=("ula",), help="Antenna array type.")
     parser.add_argument("--array-size", default="1x1", help="Linear array size, e.g. 1x4.")
+    parser.add_argument("--ul-num-tx-antennas", type=int, default=1, help="Number of UE transmit antennas for UL feedback.")
+    parser.add_argument("--ul-num-rx-antennas", type=int, default=1, help="Number of BS receive antennas for UL feedback.")
+    parser.add_argument("--ul-array-size", default="1x1", help="UL linear array size, e.g. 1x4.")
     parser.add_argument("--snr-db", type=float, default=20.0, help="Target AWGN SNR in dB.")
     parser.add_argument(
         "--channel",
@@ -88,6 +91,9 @@ def main() -> None:
         num_rx_antennas=args.num_rx_antennas,
         array_type=args.array_type,
         array_size=args.array_size,
+        ul_num_tx_antennas=args.ul_num_tx_antennas,
+        ul_num_rx_antennas=args.ul_num_rx_antennas,
+        ul_array_size=args.ul_array_size,
     )
     channel_cfg = ChannelConfig(
         channel_type=args.channel,
@@ -133,8 +139,8 @@ def main() -> None:
     print(
         "Done. "
         f"Channel={key['channel_type']}, SNR={key['target_snr_db']} dB, "
-        f"SwinJSCC PSNR={semantic_psnr:.2f} dB, "
-        f"H.264+LDPC PSNR={traditional_psnr:.2f} dB, "
+        f"SwinJSCC PSNR={format_metric(semantic_psnr, suffix=' dB')}, "
+        f"H.264+LDPC PSNR={format_metric(traditional_psnr, suffix=' dB')}, "
         f"CE NMSE={ce_nmse_db:.2f} dB, "
         f"BS CSI NMSE={csi_nmse_db:.2f} dB, "
         f"Feedback={key['csi_feedback_quality'].get('feedback_method')}, "
@@ -163,14 +169,16 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
         f"- DL measured SNR: `{summary['dl_measured_snr_db']:.2f} dB`",
         f"- UL measured SNR: `{summary['ul_measured_snr_db']:.2f} dB`",
         f"- Doppler: `{summary['channel_doppler_hz']} Hz`",
-        f"- Tx/Rx antennas: `{summary.get('num_tx_antennas', 1)} x {summary.get('num_rx_antennas', 1)}`",
-        f"- Array: `{summary.get('array_type', 'ula')} {summary.get('array_size', '1x1')}`",
+        f"- DL Tx/Rx antennas: `{summary.get('num_tx_antennas', 1)} x {summary.get('num_rx_antennas', 1)}`",
+        f"- UL Tx/Rx antennas: `{summary.get('ul_num_tx_antennas', 1)} x {summary.get('ul_num_rx_antennas', 1)}`",
+        f"- DL Array: `{summary.get('array_type', 'ula')} {summary.get('array_size', '1x1')}`",
+        f"- UL Array: `{summary.get('array_type', 'ula')} {summary.get('ul_array_size', '1x1')}`",
         f"- DL used symbols: `{summary['dl_used_symbols']}`",
         "",
         "## Image Reconstruction",
         "",
-        f"- SwinJSCC PSNR: `{reconstructed.get('psnr_db'):.2f} dB`",
-        f"- H.264+LDPC PSNR: `{conventional.get('psnr_db'):.2f} dB`",
+        f"- SwinJSCC PSNR: `{format_metric(reconstructed.get('psnr_db'), suffix=' dB')}`",
+        f"- H.264+LDPC PSNR: `{format_metric(conventional.get('psnr_db'), suffix=' dB')}`",
         f"- H.264 bytes: `{conventional.get('h264_bytes')}`",
         f"- H.264 CRF: `{conventional.get('h264_crf')}`",
         f"- LDPC rate: `{conventional.get('ldpc_rate')}`",
@@ -184,10 +192,13 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
         "",
         f"- Feedback method: `{csi.get('feedback_method')}`",
         f"- Feedback bits: `{csi.get('feedback_bits')}`",
-        f"- Feedback BER: `{csi.get('feedback_ber'):.6g}`",
-        f"- UE compression NMSE: `{csi.get('ue_compression_nmse_db'):.2f} dB`",
-        f"- BS recovered CSI NMSE: `{csi.get('bs_recovered_csi_nmse_db'):.2f} dB`",
-        f"- BS recovered true CSI NMSE: `{csi.get('bs_recovered_true_csi_nmse_db'):.2f} dB`",
+        f"- Feedback BER: `{format_metric(csi.get('feedback_ber'), precision=6)}`",
+        f"- UE compression NMSE: `{format_metric(csi.get('ue_compression_nmse_db'), suffix=' dB')}`",
+        f"- BS recovered CSI NMSE: `{format_metric(csi.get('bs_recovered_csi_nmse_db'), suffix=' dB')}`",
+        f"- BS recovered true CSI NMSE: `{format_metric(csi.get('bs_recovered_true_csi_nmse_db'), suffix=' dB')}`",
+        f"- UL X_tx shape: `{csi.get('ul_x_tx_shape')}`",
+        f"- UL Y_rx shape: `{csi.get('ul_y_rx_shape')}`",
+        f"- UL H_true shape: `{csi.get('ul_h_true_shape')}`",
         "",
         "## Channel Estimation",
         "",
@@ -206,6 +217,15 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
     for name, path in output_paths.items():
         lines.append(f"- {name}: `{path}`")
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def format_metric(value, precision: int = 2, suffix: str = "") -> str:
+    if value is None:
+        return "N/A"
+    try:
+        return f"{float(value):.{precision}f}{suffix}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 if __name__ == "__main__":

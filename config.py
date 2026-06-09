@@ -32,6 +32,9 @@ class NRPhyConfig:
     num_rx_antennas: int = 1
     array_type: str = "ula"
     array_size: str = "1x1"
+    ul_num_tx_antennas: int = 1
+    ul_num_rx_antennas: int = 1
+    ul_array_size: str = "1x1"
 
     def __post_init__(self) -> None:
         if self.symbols_per_slot != 14:
@@ -48,15 +51,28 @@ class NRPhyConfig:
             raise ValueError("pilot_spacing must be positive.")
         if self.num_tx_antennas <= 0 or self.num_rx_antennas <= 0:
             raise ValueError("num_tx_antennas and num_rx_antennas must be positive.")
+        if self.ul_num_tx_antennas <= 0 or self.ul_num_rx_antennas <= 0:
+            raise ValueError("ul_num_tx_antennas and ul_num_rx_antennas must be positive.")
         if self.array_type.lower() != "ula":
             raise ValueError("Only --array-type ula is supported in the first MIMO version.")
         expected_size = f"1x{max(self.num_tx_antennas, self.num_rx_antennas)}"
-        if self.is_mimo and self.array_size.lower() != expected_size:
+        if self.is_dl_mimo and self.array_size.lower() != expected_size:
             raise ValueError(f"For this ULA MIMO mode, array_size should be {expected_size}.")
+        expected_ul_size = f"1x{max(self.ul_num_tx_antennas, self.ul_num_rx_antennas)}"
+        if self.is_ul_mimo and self.ul_array_size.lower() != expected_ul_size:
+            raise ValueError(f"For this ULA UL MIMO mode, ul_array_size should be {expected_ul_size}.")
 
     @property
     def is_mimo(self) -> bool:
+        return self.is_dl_mimo or self.is_ul_mimo
+
+    @property
+    def is_dl_mimo(self) -> bool:
         return self.num_tx_antennas > 1 or self.num_rx_antennas > 1
+
+    @property
+    def is_ul_mimo(self) -> bool:
+        return self.ul_num_tx_antennas > 1 or self.ul_num_rx_antennas > 1
 
     @property
     def subcarrier_spacing_hz(self) -> float:

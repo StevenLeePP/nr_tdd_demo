@@ -54,17 +54,17 @@ class ChannelEstimator:
     def estimate_slot_mimo(self, rx_grid: ComplexArray, slot_idx: int) -> ComplexArray:
         """Estimate [N_rx, N_tx, subcarrier, symbol] CSI from orthogonal Tx pilots."""
         rx_grid = np.asarray(rx_grid, dtype=np.complex128)
-        if rx_grid.shape != (self.cfg.num_rx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot):
+        if rx_grid.shape != (self.mapper.num_rx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot):
             raise ValueError("MIMO rx_grid must have shape [num_rx, n_subcarriers, symbols].")
         h_est = np.zeros(
-            (self.cfg.num_rx_antennas, self.cfg.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot),
+            (self.mapper.num_rx_antennas, self.mapper.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot),
             dtype=np.complex128,
         )
         all_subcarriers = np.arange(self.cfg.n_subcarriers)
         all_symbols = np.arange(self.cfg.symbols_per_slot)
         pilot_symbols = np.asarray(self.mapper.pilot_symbols)
-        for rx_idx in range(self.cfg.num_rx_antennas):
-            for tx_idx in range(self.cfg.num_tx_antennas):
+        for rx_idx in range(self.mapper.num_rx_antennas):
+            for tx_idx in range(self.mapper.num_tx_antennas):
                 sparse_h = np.full(
                     (self.cfg.n_subcarriers, self.cfg.symbols_per_slot),
                     np.nan + 1j * np.nan,
@@ -124,6 +124,36 @@ class ChannelEstimator:
         if method.lower() == "mmse":
             return numerator / (denom + noise_variance + 1e-12)
         raise ValueError("Equalizer method must be zf or mmse.")
+
+    @staticmethod
+    def equalize_mimo_spatial_streams(
+        rx_grid: ComplexArray,
+        h_est: ComplexArray,
+        method: str = "mmse",
+        noise_variance: float = 0.0,
+    ) -> ComplexArray:
+        """Recover N_tx spatial streams from [N_rx, F, T] observations."""
+        rx_grid = np.asarray(rx_grid, dtype=np.complex128)
+        h_est = np.asarray(h_est, dtype=np.complex128)
+        if h_est.ndim != 4:
+            raise ValueError("h_est must have shape [N_rx, N_tx, subcarrier, symbol].")
+        n_rx, n_tx, n_sc, n_sym = h_est.shape
+        if rx_grid.shape != (n_rx, n_sc, n_sym):
+            raise ValueError("rx_grid must have shape [N_rx, subcarrier, symbol].")
+        out = np.zeros((n_tx, n_sc, n_sym), dtype=np.complex128)
+        eye = np.eye(n_tx, dtype=np.complex128)
+        use_mmse = method.lower() == "mmse"
+        if method.lower() not in {"mmse", "zf"}:
+            raise ValueError("Equalizer method must be zf or mmse.")
+        for subcarrier_idx in range(n_sc):
+            for symbol_idx in range(n_sym):
+                h = h_est[:, :, subcarrier_idx, symbol_idx]
+                y = rx_grid[:, subcarrier_idx, symbol_idx]
+                gram = h.conj().T @ h
+                if use_mmse:
+                    gram = gram + noise_variance * eye
+                out[:, subcarrier_idx, symbol_idx] = np.linalg.pinv(gram) @ h.conj().T @ y
+        return out
 
 
 def delay_domain_denoise_csi(

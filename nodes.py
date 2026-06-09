@@ -74,9 +74,19 @@ class BaseStation:
         equalized_grids = []
         for slot_idx, rx_grid in enumerate(rx_grids):
             h_est = self.ul_estimator.estimate_slot(rx_grid, slot_idx)
-            equalized_grids.append(
-                self.ul_estimator.equalize(rx_grid, h_est, method="mmse", noise_variance=noise_variance)
-            )
+            if np.asarray(rx_grid).ndim == 3:
+                equalized_grids.append(
+                    self.ul_estimator.equalize_mimo_spatial_streams(
+                        rx_grid,
+                        h_est,
+                        method="mmse",
+                        noise_variance=noise_variance,
+                    )
+                )
+            else:
+                equalized_grids.append(
+                    self.ul_estimator.equalize(rx_grid, h_est, method="mmse", noise_variance=noise_variance)
+                )
         feedback_symbols = self.ul_mapper.extract_data_symbols(equalized_grids)
         return qpsk_demodulate(feedback_symbols)[:expected_bits]
 

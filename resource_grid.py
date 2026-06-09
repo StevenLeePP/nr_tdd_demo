@@ -21,8 +21,20 @@ class ResourceGridMapper:
         self.link_name = link_name
 
     @property
-    def mimo_downlink(self) -> bool:
-        return self.link_name.upper() == "DL" and self.cfg.is_mimo
+    def is_downlink(self) -> bool:
+        return self.link_name.upper() == "DL"
+
+    @property
+    def num_tx_antennas(self) -> int:
+        return self.cfg.num_tx_antennas if self.is_downlink else self.cfg.ul_num_tx_antennas
+
+    @property
+    def num_rx_antennas(self) -> int:
+        return self.cfg.num_rx_antennas if self.is_downlink else self.cfg.ul_num_rx_antennas
+
+    @property
+    def mimo_link(self) -> bool:
+        return self.num_tx_antennas > 1 or self.num_rx_antennas > 1
 
     def pilot_mask_for_slot(self, slot_idx: int, tx_idx: int | None = None) -> np.ndarray:
         mask = np.zeros((self.cfg.n_subcarriers, self.cfg.symbols_per_slot), dtype=bool)
@@ -30,9 +42,9 @@ class ResourceGridMapper:
         for symbol_idx in self.pilot_symbols:
             # Comb structure in every OFDM symbol. The default spacing is 4,
             # which gives the requested data:pilot RE ratio of 3:1.
-            spacing = self.cfg.pilot_spacing * self.cfg.num_tx_antennas if self.mimo_downlink else self.cfg.pilot_spacing
-            if self.mimo_downlink and tx_idx is None:
-                for antenna_idx in range(self.cfg.num_tx_antennas):
+            spacing = self.cfg.pilot_spacing * self.num_tx_antennas if self.mimo_link else self.cfg.pilot_spacing
+            if self.mimo_link and tx_idx is None:
+                for antenna_idx in range(self.num_tx_antennas):
                     shift = (symbol_idx + slot_idx + antenna_idx) % spacing
                     mask[:, symbol_idx] |= ((subcarrier_idx + shift) % spacing) == 0
                 continue
@@ -51,10 +63,10 @@ class ResourceGridMapper:
 
     def insert_pilots(self, grid: ComplexArray, slot_idx: int) -> Dict[int, ComplexArray]:
         pilot_sequences: Dict[int, ComplexArray] = {}
-        if self.mimo_downlink:
-            if grid.shape != (self.cfg.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot):
-                raise ValueError("MIMO DL grid must have shape [num_tx, n_subcarriers, symbols].")
-            for tx_idx in range(self.cfg.num_tx_antennas):
+        if self.mimo_link:
+            if grid.shape != (self.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot):
+                raise ValueError("MIMO grid must have shape [num_tx, n_subcarriers, symbols].")
+            for tx_idx in range(self.num_tx_antennas):
                 pilot_mask = self.pilot_mask_for_slot(slot_idx, tx_idx=tx_idx)
                 for symbol_idx in self.pilot_symbols:
                     subcarriers = np.flatnonzero(pilot_mask[:, symbol_idx])
@@ -80,7 +92,8 @@ class ResourceGridMapper:
         ]
 
     def data_re_per_slot(self, slot_idx: int = 0) -> int:
-        return len(self.data_positions(slot_idx))
+        layers = self.num_tx_antennas if (not self.is_downlink and self.mimo_link) else 1
+        return len(self.data_positions(slot_idx)) * layers
 
     def map_symbols_to_slots(
         self, data_symbols: ComplexArray, n_slots: int
@@ -93,27 +106,40 @@ class ResourceGridMapper:
 
         for slot_idx in range(n_slots):
             grid_shape = (
-                (self.cfg.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot)
-                if self.mimo_downlink
+                (self.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot)
+                if self.mimo_link
                 else (self.cfg.n_subcarriers, self.cfg.symbols_per_slot)
             )
             grid = np.zeros(grid_shape, dtype=np.complex128)
             allocation = np.zeros(grid.shape, dtype=np.uint8)
             self.insert_pilots(grid, slot_idx)
-            if self.mimo_downlink:
+            if self.mimo_link:
                 allocation = np.zeros((self.cfg.n_subcarriers, self.cfg.symbols_per_slot), dtype=np.uint8)
             allocation[self.pilot_mask_for_slot(slot_idx)] = self.pilot_label
             positions = self.data_positions(slot_idx)
-            take = min(len(positions), max(0, data_symbols.size - cursor))
+            capacity = len(positions) * (self.num_tx_antennas if (self.mimo_link and not self.is_downlink) else 1)
+            take = min(capacity, max(0, data_symbols.size - cursor))
             if take:
-                for (subcarrier_idx, symbol_idx), value in zip(
-                    positions[:take], data_symbols[cursor : cursor + take]
-                ):
-                    if self.mimo_downlink:
-                        grid[:, subcarrier_idx, symbol_idx] = value / np.sqrt(self.cfg.num_tx_antennas)
-                    else:
-                        grid[subcarrier_idx, symbol_idx] = value
-                    allocation[subcarrier_idx, symbol_idx] = self.semantic_label
+                if self.mimo_link and not self.is_downlink:
+                    local_cursor = 0
+                    for subcarrier_idx, symbol_idx in positions:
+                        for tx_idx in range(self.num_tx_antennas):
+                            if local_cursor >= take:
+                                break
+                            grid[tx_idx, subcarrier_idx, symbol_idx] = data_symbols[cursor + local_cursor]
+                            allocation[subcarrier_idx, symbol_idx] = self.semantic_label
+                            local_cursor += 1
+                        if local_cursor >= take:
+                            break
+                else:
+                    for (subcarrier_idx, symbol_idx), value in zip(
+                        positions[:take], data_symbols[cursor : cursor + take]
+                    ):
+                        if self.mimo_link:
+                            grid[:, subcarrier_idx, symbol_idx] = value / np.sqrt(self.num_tx_antennas)
+                        else:
+                            grid[subcarrier_idx, symbol_idx] = value
+                        allocation[subcarrier_idx, symbol_idx] = self.semantic_label
             cursor += take
             grids.append(grid)
             allocations.append(allocation)
@@ -144,31 +170,31 @@ class ResourceGridMapper:
 
         for slot_idx in range(n_slots):
             grid_shape = (
-                (self.cfg.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot)
-                if self.mimo_downlink
+                (self.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot)
+                if self.mimo_link
                 else (self.cfg.n_subcarriers, self.cfg.symbols_per_slot)
             )
             grid = np.zeros(grid_shape, dtype=np.complex128)
             allocation = np.zeros(grid.shape, dtype=np.uint8)
             self.insert_pilots(grid, slot_idx)
-            if self.mimo_downlink:
+            if self.mimo_link:
                 allocation = np.zeros((self.cfg.n_subcarriers, self.cfg.symbols_per_slot), dtype=np.uint8)
             allocation[self.pilot_mask_for_slot(slot_idx)] = self.pilot_label
 
             for subcarrier_idx, symbol_idx in self.data_positions(slot_idx):
                 if semantic_cursor < semantic_symbols.size:
-                    if self.mimo_downlink:
+                    if self.mimo_link:
                         grid[:, subcarrier_idx, symbol_idx] = semantic_symbols[semantic_cursor] / np.sqrt(
-                            self.cfg.num_tx_antennas
+                            self.num_tx_antennas
                         )
                     else:
                         grid[subcarrier_idx, symbol_idx] = semantic_symbols[semantic_cursor]
                     allocation[subcarrier_idx, symbol_idx] = self.semantic_label
                     semantic_cursor += 1
                 elif conventional_cursor < conventional_symbols.size:
-                    if self.mimo_downlink:
+                    if self.mimo_link:
                         grid[:, subcarrier_idx, symbol_idx] = conventional_symbols[conventional_cursor] / np.sqrt(
-                            self.cfg.num_tx_antennas
+                            self.num_tx_antennas
                         )
                     else:
                         grid[subcarrier_idx, symbol_idx] = conventional_symbols[conventional_cursor]
@@ -187,7 +213,10 @@ class ResourceGridMapper:
         values: List[complex] = []
         for slot_idx, grid in enumerate(grids):
             for subcarrier_idx, symbol_idx in self.data_positions(slot_idx):
-                values.append(grid[subcarrier_idx, symbol_idx])
+                if np.asarray(grid).ndim == 3:
+                    values.extend(grid[:, subcarrier_idx, symbol_idx])
+                else:
+                    values.append(grid[subcarrier_idx, symbol_idx])
         return np.asarray(values, dtype=np.complex128)
 
     def extract_allocated_symbols(

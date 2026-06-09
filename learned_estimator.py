@@ -46,7 +46,7 @@ class LearnedChannelEstimator:
             payload = None
             cfg = CommFoundationConfig(
                 in_complex_channels=phy_cfg.num_rx_antennas * phy_cfg.num_tx_antennas
-                if phy_cfg.is_mimo
+                if phy_cfg.is_dl_mimo
                 else 1
             )
         self.model = CommFoundationChannelEstimator(cfg).to(self.device)

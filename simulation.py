@@ -67,8 +67,11 @@ class SimulationResult:
             "csi_metadata": self.csi_metadata,
             "num_tx_antennas": self.channel_estimation_quality.get("num_tx_antennas", 1),
             "num_rx_antennas": self.channel_estimation_quality.get("num_rx_antennas", 1),
+            "ul_num_tx_antennas": self.csi_feedback_quality.get("ul_num_tx_antennas", 1),
+            "ul_num_rx_antennas": self.csi_feedback_quality.get("ul_num_rx_antennas", 1),
             "array_type": self.channel_estimation_quality.get("array_type", "ula"),
             "array_size": self.channel_estimation_quality.get("array_size", "1x1"),
+            "ul_array_size": self.csi_feedback_quality.get("ul_array_size", "1x1"),
             "dl_channel_taps": self._serialize_complex_array(self.dl_channel_h),
             "ul_channel_taps": self._serialize_complex_array(self.ul_channel_h),
             "output_paths": self.output_paths,
@@ -214,12 +217,35 @@ class TDDPhysicalLayerSimulation:
         feedback_h_true = self._feedback_csi_view(h_true)
         compressed = self._compress_csi_for_ul_capacity(feedback_h_est)
         ul_tx, ul_used_symbols, ul_grids = self.ue.build_csi_feedback(compressed)
-        if self.phy_cfg.is_mimo:
+        if self.phy_cfg.is_ul_mimo:
+            ul_phy_cfg = replace(
+                self.phy_cfg,
+                num_tx_antennas=self.phy_cfg.ul_num_tx_antennas,
+                num_rx_antennas=self.phy_cfg.ul_num_rx_antennas,
+                array_size=self.phy_cfg.ul_array_size,
+                ul_num_tx_antennas=1,
+                ul_num_rx_antennas=1,
+                ul_array_size="1x1",
+            )
+            ul_channel_model = MultipathChannel(
+                ul_phy_cfg,
+                channel_type=self.channel_cfg.channel_type,
+                delays=self.channel_cfg.delays,
+                powers_db=self.channel_cfg.powers_db,
+                rician_k_db=self.channel_cfg.rician_k_db,
+                doppler_hz=self.channel_cfg.doppler_hz,
+                rng=np.random.default_rng(self.phy_cfg.rng_seed + 1),
+            )
+            ul_channel = ul_channel_model.transmit(ul_tx)
+        elif self.phy_cfg.is_dl_mimo:
             ul_phy_cfg = replace(
                 self.phy_cfg,
                 num_tx_antennas=1,
                 num_rx_antennas=1,
                 array_size="1x1",
+                ul_num_tx_antennas=1,
+                ul_num_rx_antennas=1,
+                ul_array_size="1x1",
             )
             ul_channel_model = MultipathChannel(
                 ul_phy_cfg,
@@ -250,8 +276,21 @@ class TDDPhysicalLayerSimulation:
             bit_errors,
             h_true=feedback_h_true,
         )
-        if self.phy_cfg.is_mimo:
+        if self.phy_cfg.is_dl_mimo:
             csi_quality["mimo_feedback_scope"] = "representative_rx0_tx0_subchannel"
+        csi_quality.update(
+            {
+                "ul_num_tx_antennas": self.phy_cfg.ul_num_tx_antennas,
+                "ul_num_rx_antennas": self.phy_cfg.ul_num_rx_antennas,
+                "ul_array_size": self.phy_cfg.ul_array_size,
+                "ul_x_tx_shape": list(np.asarray(ul_tx).shape),
+                "ul_y_rx_shape": list(np.asarray(ul_channel.waveform).shape),
+                "ul_h_true_shape": list(np.asarray(ul_channel.frequency_response_grid).shape)
+                if ul_channel.frequency_response_grid is not None
+                else None,
+                "ul_mimo_equalizer": "spatial_stream_mmse" if self.phy_cfg.is_ul_mimo else "siso_mmse",
+            }
+        )
         ce_quality = {
             "estimator": self.channel_estimator,
             "h_est_nmse": float(csi_nmse(h_true, dl_rx.h_est)),
@@ -269,7 +308,7 @@ class TDDPhysicalLayerSimulation:
             "num_rx_antennas": self.phy_cfg.num_rx_antennas,
             "array_type": self.phy_cfg.array_type,
             "array_size": self.phy_cfg.array_size,
-            "mimo_equalizer": "single_stream_rx_mmse_combiner" if self.phy_cfg.is_mimo else "siso_mmse",
+            "mimo_equalizer": "single_stream_rx_mmse_combiner" if self.phy_cfg.is_dl_mimo else "siso_mmse",
         }
 
         self._write_visualizations(
