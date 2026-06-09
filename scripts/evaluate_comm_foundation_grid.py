@@ -98,9 +98,20 @@ def write_outputs(rows: list[dict], output_dir: Path) -> None:
         writer.writeheader()
         writer.writerows(rows)
 
+    gain_rows = compute_gain_rows(rows)
+    gain_csv_path = output_dir / "gain_vs_baselines.csv"
+    if gain_rows:
+        gain_fields = sorted({key for row in gain_rows for key in row.keys()})
+        with gain_csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=gain_fields)
+            writer.writeheader()
+            writer.writerows(gain_rows)
+
     lines = ["# Comm Foundation Grid Evaluation", ""]
     lines.append(f"- Cases: `{len(rows)}`")
     lines.append(f"- Metrics CSV: `{csv_path}`")
+    if gain_rows:
+        lines.append(f"- Gain CSV: `{gain_csv_path}`")
     lines.append("")
     lines.append("| Estimator | Channel | SNR | Doppler | Pilot | PSNR | CE NMSE | EVM | BS CSI NMSE | Runtime |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -112,7 +123,79 @@ def write_outputs(rows: list[dict], output_dir: Path) -> None:
             f"{row['pilot_spacing']} | {row['semantic_psnr_db']:.2f} | {row['ce_nmse_db']:.2f} | "
             f"{row['semantic_evm_db']:.2f} | {row['bs_csi_nmse_db']:.2f} | {row['estimator_runtime_ms']:.3f} |"
         )
+    if gain_rows:
+        lines.extend(["", "## Gain Statistics", ""])
+        lines.append("| Estimator | Baseline | Mean CE Gain | Mean PSNR Gain | Mean EVM Gain | Mean Runtime Delta |")
+        lines.append("|---|---|---:|---:|---:|---:|")
+        for row in summarize_gains(gain_rows):
+            lines.append(
+                f"| {row['estimator']} | {row['baseline']} | {row['mean_ce_nmse_gain_db']:.3f} | "
+                f"{row['mean_psnr_gain_db']:.3f} | {row['mean_evm_gain_db']:.3f} | "
+                f"{row['mean_runtime_delta_ms']:.3f} |"
+            )
+        lines.extend(
+            [
+                "",
+                "## Key Questions",
+                "",
+                "- `comm_foundation_trained` 相对 `ls_smoothing` 的平均收益见上表；如果 CE/PSNR/EVM 增益接近 0，说明当前 residual 还没有超过结构先验。",
+                "- `comm_foundation_trained` 相对 `comm_foundation_untrained` 的收益可用于判断 checkpoint 是否学到了非零修正。",
+                "- runtime delta 用于判断 trained residual 的推理开销是否值得。"
+            ]
+        )
     (output_dir / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def case_key(row: dict) -> tuple:
+    return (row["channel"], row["snr_db"], row["doppler_hz"], row["pilot_spacing"])
+
+
+def compute_gain_rows(rows: list[dict]) -> list[dict]:
+    valid = [row for row in rows if "command" not in row]
+    by_estimator = {(case_key(row), row["estimator"]): row for row in valid}
+    gain_rows = []
+    for row in valid:
+        if row["estimator"] in {"ls", "ls_smoothing"}:
+            continue
+        for baseline in ("ls_smoothing", "comm_foundation_untrained"):
+            base = by_estimator.get((case_key(row), baseline))
+            if base is None or base is row:
+                continue
+            gain_rows.append(
+                {
+                    "estimator": row["estimator"],
+                    "baseline": baseline,
+                    "channel": row["channel"],
+                    "snr_db": row["snr_db"],
+                    "doppler_hz": row["doppler_hz"],
+                    "pilot_spacing": row["pilot_spacing"],
+                    "ce_nmse_gain_db": row["ce_nmse_db"] - base["ce_nmse_db"],
+                    "psnr_gain_db": row["semantic_psnr_db"] - base["semantic_psnr_db"],
+                    "evm_gain_db": row["semantic_evm_db"] - base["semantic_evm_db"],
+                    "bs_csi_gain_db": row["bs_csi_nmse_db"] - base["bs_csi_nmse_db"],
+                    "runtime_delta_ms": row["estimator_runtime_ms"] - base["estimator_runtime_ms"],
+                }
+            )
+    return gain_rows
+
+
+def summarize_gains(gain_rows: list[dict]) -> list[dict]:
+    groups = {}
+    for row in gain_rows:
+        groups.setdefault((row["estimator"], row["baseline"]), []).append(row)
+    summaries = []
+    for (estimator, baseline), group in sorted(groups.items()):
+        summaries.append(
+            {
+                "estimator": estimator,
+                "baseline": baseline,
+                "mean_ce_nmse_gain_db": sum(row["ce_nmse_gain_db"] for row in group) / len(group),
+                "mean_psnr_gain_db": sum(row["psnr_gain_db"] for row in group) / len(group),
+                "mean_evm_gain_db": sum(row["evm_gain_db"] for row in group) / len(group),
+                "mean_runtime_delta_ms": sum(row["runtime_delta_ms"] for row in group) / len(group),
+            }
+        )
+    return summaries
 
 
 def main() -> None:
