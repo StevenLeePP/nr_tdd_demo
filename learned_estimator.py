@@ -12,6 +12,7 @@ from .models.comm_foundation_model import (
     CommFoundationChannelEstimator,
     CommFoundationConfig,
     channels_to_complex_np,
+    channels_to_mimo_complex_np,
     complex_np_to_channels,
 )
 from .utils import ComplexArray
@@ -43,7 +44,11 @@ class LearnedChannelEstimator:
             cfg = CommFoundationConfig(**payload["model_config"])
         else:
             payload = None
-            cfg = CommFoundationConfig()
+            cfg = CommFoundationConfig(
+                in_complex_channels=phy_cfg.num_rx_antennas * phy_cfg.num_tx_antennas
+                if phy_cfg.is_mimo
+                else 1
+            )
         self.model = CommFoundationChannelEstimator(cfg).to(self.device)
         if payload is not None:
             self.model.load_state_dict(payload["state_dict"], strict=False)
@@ -66,6 +71,16 @@ class LearnedChannelEstimator:
         if not self.use_neural_model:
             self.last_inference_time_ms = (time.perf_counter() - start) * 1000.0
             return h_input.astype(np.complex128)
+        if h_input.ndim == 4:
+            if self.model.cfg.in_complex_channels != h_input.shape[0] * h_input.shape[1]:
+                self.last_inference_time_ms = (time.perf_counter() - start) * 1000.0
+                return h_input.astype(np.complex128)
+            x = complex_np_to_channels(np.asarray(h_input, dtype=np.complex64)[None]).to(self.device)
+            pred = self.model(x)
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            self.last_inference_time_ms = (time.perf_counter() - start) * 1000.0
+            return channels_to_mimo_complex_np(pred, h_input.shape[0], h_input.shape[1])[0].astype(np.complex128)
         x = complex_np_to_channels(np.asarray(h_input, dtype=np.complex64)[None]).to(self.device)
         pred = self.model(x)
         if self.device.type == "cuda":

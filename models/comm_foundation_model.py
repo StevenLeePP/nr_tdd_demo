@@ -40,11 +40,11 @@ class ComplexCommunicationBackbone(nn.Module):
 
 
 class ChannelEstimationHead(nn.Module):
-    """Maps Z_comm to a residual channel correction with shape [B, 2, F, T]."""
+    """Maps Z_comm to a residual channel correction with shape [B, 2*C, F, T]."""
 
-    def __init__(self, in_complex_channels: int, zero_init: bool = True):
+    def __init__(self, in_complex_channels: int, out_complex_channels: int = 1, zero_init: bool = True):
         super().__init__()
-        self.proj = ComplexConv2d(in_complex_channels, 1, kernel_size=1, padding=0)
+        self.proj = ComplexConv2d(in_complex_channels, out_complex_channels, kernel_size=1, padding=0)
         if zero_init:
             nn.init.zeros_(self.proj.real.weight)
             nn.init.zeros_(self.proj.imag.weight)
@@ -95,7 +95,7 @@ class CommFoundationChannelEstimator(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.backbone = ComplexCommunicationBackbone(cfg)
-        self.channel_head = ChannelEstimationHead(self.backbone.out_complex_channels)
+        self.channel_head = ChannelEstimationHead(self.backbone.out_complex_channels, cfg.in_complex_channels)
         self.residual_scale_param = nn.Parameter(torch.tensor(float(cfg.residual_scale)))
         self.csi_feedback_head = CSIFeedbackHead(self.backbone.out_complex_channels)
         self.reliability_head = ReliabilityHead(self.backbone.out_complex_channels)
@@ -104,7 +104,7 @@ class CommFoundationChannelEstimator(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         z_comm = self.backbone(x)
         residual = self.channel_head(z_comm)
-        return x[:, :2] + self.residual_scale_param * residual
+        return x[:, : 2 * self.cfg.in_complex_channels] + self.residual_scale_param * residual
 
     def residual(self, x: torch.Tensor) -> torch.Tensor:
         z_comm = self.backbone(x)
@@ -126,6 +126,9 @@ def complex_np_to_channels(x) -> torch.Tensor:
     if real.ndim == 3:
         real = real[:, None]
         imag = imag[:, None]
+    elif real.ndim == 5:
+        real = real.reshape(real.shape[0], real.shape[1] * real.shape[2], real.shape[3], real.shape[4])
+        imag = imag.reshape(imag.shape[0], imag.shape[1] * imag.shape[2], imag.shape[3], imag.shape[4])
     return torch.cat([real, imag], dim=1)
 
 
@@ -133,7 +136,14 @@ def channels_to_complex_np(x: torch.Tensor):
     x = x.detach().cpu()
     half = x.size(1) // 2
     arr = x[:, :half].numpy() + 1j * x[:, half:].numpy()
-    return arr.squeeze(1)
+    return arr[:, 0] if arr.shape[1] == 1 else arr
+
+
+def channels_to_mimo_complex_np(x: torch.Tensor, num_rx: int, num_tx: int):
+    arr = channels_to_complex_np(x)
+    if arr.ndim != 4 or arr.shape[1] != num_rx * num_tx:
+        raise ValueError("Channel tensor cannot be reshaped to requested MIMO dimensions.")
+    return arr.reshape(arr.shape[0], num_rx, num_tx, arr.shape[2], arr.shape[3])
 
 
 def nmse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

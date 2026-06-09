@@ -25,6 +25,7 @@ class DownlinkBuild:
 @dataclass
 class DownlinkReceive:
     reconstructed: object
+    rx_grids: List[ComplexArray]
     semantic_pre_equalized: ComplexArray
     semantic_equalized: ComplexArray
     conventional_pre_equalized: ComplexArray
@@ -108,9 +109,19 @@ class UserEquipment:
                 h_est = self.learned_estimator.predict(h_est)
                 estimator_inference_time_ms += float(self.learned_estimator.last_inference_time_ms)
             h_est_slots.append(h_est)
-            equalized_grids.append(
-                self.estimator.equalize(rx_grid, h_est, method="mmse", noise_variance=noise_variance)
-            )
+            if np.asarray(rx_grid).ndim == 3:
+                equalized_grids.append(
+                    self.estimator.equalize_mimo_single_stream(
+                        rx_grid,
+                        h_est,
+                        method="mmse",
+                        noise_variance=noise_variance,
+                    )
+                )
+            else:
+                equalized_grids.append(
+                    self.estimator.equalize(rx_grid, h_est, method="mmse", noise_variance=noise_variance)
+                )
 
         semantic_pre = self.mapper.extract_allocated_symbols(
             rx_grids, allocations, self.mapper.semantic_label
@@ -127,6 +138,7 @@ class UserEquipment:
         reconstructed = self.codec.decode_symbols(semantic_eq, output_path=output_path)
         return DownlinkReceive(
             reconstructed=reconstructed,
+            rx_grids=rx_grids,
             semantic_pre_equalized=semantic_pre,
             semantic_equalized=semantic_eq,
             conventional_pre_equalized=conventional_pre,

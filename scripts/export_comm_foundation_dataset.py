@@ -70,12 +70,27 @@ def generate_sample(
     for slot_idx, rx_grid in enumerate(rx_grids):
         h_ls = estimator.estimate_slot(rx_grid, slot_idx)
         h_ls_slots.append(h_ls)
-        equalized_slots.append(
-            estimator.equalize(rx_grid, h_ls, method="mmse", noise_variance=channel_out.noise_variance)
-        )
-        mask = mapper.pilot_mask_for_slot(slot_idx)
+        if np.asarray(rx_grid).ndim == 3:
+            equalized_slots.append(
+                estimator.equalize_mimo_single_stream(
+                    rx_grid,
+                    h_ls,
+                    method="mmse",
+                    noise_variance=channel_out.noise_variance,
+                )
+            )
+            mask = np.stack(
+                [mapper.pilot_mask_for_slot(slot_idx, tx_idx=tx_idx) for tx_idx in range(cfg.num_tx_antennas)],
+                axis=0,
+            )
+        else:
+            equalized_slots.append(
+                estimator.equalize(rx_grid, h_ls, method="mmse", noise_variance=channel_out.noise_variance)
+            )
+            mask = mapper.pilot_mask_for_slot(slot_idx)
         pilot_masks.append(mask)
-        pilot_obs.append(np.where(mask, rx_grid, 0.0))
+        obs_mask = np.any(mask, axis=0)[None, :, :] if np.asarray(mask).ndim == 3 else mask
+        pilot_obs.append(np.where(obs_mask, rx_grid, 0.0))
 
     h_ls_grid = np.stack(h_ls_slots, axis=0)
     h_true = (
@@ -197,6 +212,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n_subcarriers", type=int, default=72)
     parser.add_argument("--dl_slots", type=int, default=1)
     parser.add_argument("--pilot_spacing", type=int, default=4)
+    parser.add_argument("--num_tx_antennas", type=int, default=1)
+    parser.add_argument("--num_rx_antennas", type=int, default=1)
+    parser.add_argument("--array_type", default="ula")
+    parser.add_argument("--array_size", default="1x1")
     parser.add_argument("--dataset_version", choices=("sanity", "v1"), default="sanity")
     parser.add_argument("--val_samples", type=int, default=1000)
     parser.add_argument("--heldout_samples", type=int, default=1000)
@@ -226,6 +245,10 @@ def main() -> None:
                 snr_db=cond["snr_db"],
                 rng_seed=int(rng.integers(0, 2**31 - 1)),
                 pilot_spacing=args.pilot_spacing,
+                num_tx_antennas=args.num_tx_antennas,
+                num_rx_antennas=args.num_rx_antennas,
+                array_type=args.array_type,
+                array_size=args.array_size,
             )
             samples.append(
                 generate_sample(

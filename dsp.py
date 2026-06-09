@@ -18,6 +18,9 @@ class ChannelEstimator:
         self.mapper = mapper
 
     def estimate_slot(self, rx_grid: ComplexArray, slot_idx: int) -> ComplexArray:
+        rx_grid = np.asarray(rx_grid, dtype=np.complex128)
+        if rx_grid.ndim == 3:
+            return self.estimate_slot_mimo(rx_grid, slot_idx)
         pilot_mask = self.mapper.pilot_mask_for_slot(slot_idx)
         sparse_h = np.full(rx_grid.shape, np.nan + 1j * np.nan, dtype=np.complex128)
 
@@ -48,6 +51,44 @@ class ChannelEstimator:
             h_est[subcarrier_idx, :] = real + 1j * imag
         return h_est
 
+    def estimate_slot_mimo(self, rx_grid: ComplexArray, slot_idx: int) -> ComplexArray:
+        """Estimate [N_rx, N_tx, subcarrier, symbol] CSI from orthogonal Tx pilots."""
+        rx_grid = np.asarray(rx_grid, dtype=np.complex128)
+        if rx_grid.shape != (self.cfg.num_rx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot):
+            raise ValueError("MIMO rx_grid must have shape [num_rx, n_subcarriers, symbols].")
+        h_est = np.zeros(
+            (self.cfg.num_rx_antennas, self.cfg.num_tx_antennas, self.cfg.n_subcarriers, self.cfg.symbols_per_slot),
+            dtype=np.complex128,
+        )
+        all_subcarriers = np.arange(self.cfg.n_subcarriers)
+        all_symbols = np.arange(self.cfg.symbols_per_slot)
+        pilot_symbols = np.asarray(self.mapper.pilot_symbols)
+        for rx_idx in range(self.cfg.num_rx_antennas):
+            for tx_idx in range(self.cfg.num_tx_antennas):
+                sparse_h = np.full(
+                    (self.cfg.n_subcarriers, self.cfg.symbols_per_slot),
+                    np.nan + 1j * np.nan,
+                    dtype=np.complex128,
+                )
+                pilot_mask = self.mapper.pilot_mask_for_slot(slot_idx, tx_idx=tx_idx)
+                for symbol_idx in self.mapper.pilot_symbols:
+                    subcarriers = np.flatnonzero(pilot_mask[:, symbol_idx])
+                    pilots = self.mapper.pilot_sequence(slot_idx, symbol_idx, subcarriers.size, tx_idx=tx_idx)
+                    sparse_h[subcarriers, symbol_idx] = rx_grid[rx_idx, subcarriers, symbol_idx] / pilots
+                freq_interp = np.zeros((self.cfg.n_subcarriers, self.cfg.symbols_per_slot), dtype=np.complex128)
+                for symbol_idx in self.mapper.pilot_symbols:
+                    known_subcarriers = np.flatnonzero(~np.isnan(np.real(sparse_h[:, symbol_idx])))
+                    known_values = sparse_h[known_subcarriers, symbol_idx]
+                    real = np.interp(all_subcarriers, known_subcarriers, np.real(known_values))
+                    imag = np.interp(all_subcarriers, known_subcarriers, np.imag(known_values))
+                    freq_interp[:, symbol_idx] = real + 1j * imag
+                for subcarrier_idx in range(self.cfg.n_subcarriers):
+                    known_values = freq_interp[subcarrier_idx, pilot_symbols]
+                    real = np.interp(all_symbols, pilot_symbols, np.real(known_values))
+                    imag = np.interp(all_symbols, pilot_symbols, np.imag(known_values))
+                    h_est[rx_idx, tx_idx, subcarrier_idx, :] = real + 1j * imag
+        return h_est
+
     @staticmethod
     def equalize(
         rx_grid: ComplexArray,
@@ -61,6 +102,27 @@ class ChannelEstimator:
             return rx_grid / (h_est + eps)
         if method == "mmse":
             return rx_grid * np.conj(h_est) / (np.abs(h_est) ** 2 + noise_variance + eps)
+        raise ValueError("Equalizer method must be zf or mmse.")
+
+    @staticmethod
+    def equalize_mimo_single_stream(
+        rx_grid: ComplexArray,
+        h_est: ComplexArray,
+        method: str = "mmse",
+        noise_variance: float = 0.0,
+    ) -> ComplexArray:
+        rx_grid = np.asarray(rx_grid, dtype=np.complex128)
+        h_est = np.asarray(h_est, dtype=np.complex128)
+        if h_est.ndim != 4:
+            raise ValueError("h_est must have shape [N_rx, N_tx, subcarrier, symbol].")
+        tx_weights = np.full(h_est.shape[1], 1.0 / np.sqrt(h_est.shape[1]), dtype=np.complex128)
+        h_eff = np.einsum("rtfs,t->rfs", h_est, tx_weights)
+        numerator = np.sum(np.conj(h_eff) * rx_grid, axis=0)
+        denom = np.sum(np.abs(h_eff) ** 2, axis=0)
+        if method.lower() == "zf":
+            return numerator / (denom + 1e-12)
+        if method.lower() == "mmse":
+            return numerator / (denom + noise_variance + 1e-12)
         raise ValueError("Equalizer method must be zf or mmse.")
 
 
@@ -82,6 +144,35 @@ def delay_domain_denoise_csi(
     if n_taps <= 0 or n_taps > cfg.n_fft:
         raise ValueError("n_taps must be in [1, n_fft].")
     h_est = np.asarray(h_est, dtype=np.complex128)
+    if h_est.ndim == 4:
+        return np.stack(
+            [
+                [
+                    delay_domain_denoise_csi(
+                        h_est[rx_idx, tx_idx],
+                        cfg,
+                        n_taps=n_taps,
+                        time_average=time_average,
+                    )
+                    for tx_idx in range(h_est.shape[1])
+                ]
+                for rx_idx in range(h_est.shape[0])
+            ],
+            axis=0,
+        )
+    if h_est.ndim == 5:
+        return np.stack(
+            [
+                delay_domain_denoise_csi(
+                    h_est[slot_idx],
+                    cfg,
+                    n_taps=n_taps,
+                    time_average=time_average,
+                )
+                for slot_idx in range(h_est.shape[0])
+            ],
+            axis=0,
+        )
     if h_est.ndim == 2:
         h_est = h_est[None]
         squeeze = True
@@ -238,13 +329,14 @@ def decompress_csi(bitstream: np.ndarray, metadata: Dict[str, object]) -> Comple
     h_full = np.zeros(original_shape, dtype=np.complex128)
     src_positions = np.arange(0, original_shape[-2], stride)[: compressed_shape[-2]]
     all_subcarriers = np.arange(original_shape[-2])
-    for slot_idx in range(original_shape[0]):
+    leading_shape = original_shape[:-2]
+    for leading_idx in np.ndindex(leading_shape):
         for symbol_idx in range(original_shape[-1]):
-            known = h_ds[slot_idx, :, symbol_idx]
+            known = h_ds[leading_idx + (slice(None), symbol_idx)]
             if known.size == 1:
-                h_full[slot_idx, :, symbol_idx] = known[0]
+                h_full[leading_idx + (slice(None), symbol_idx)] = known[0]
             else:
-                h_full[slot_idx, :, symbol_idx] = np.interp(
+                h_full[leading_idx + (slice(None), symbol_idx)] = np.interp(
                     all_subcarriers, src_positions, np.real(known)
                 ) + 1j * np.interp(all_subcarriers, src_positions, np.imag(known))
     return h_full

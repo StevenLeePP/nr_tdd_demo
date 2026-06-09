@@ -36,6 +36,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dl-slots", type=int, default=72, help="Number of downlink slots.")
     parser.add_argument("--ul-slots", type=int, default=2, help="Number of uplink slots.")
     parser.add_argument("--pilot-spacing", type=int, default=4, help="Comb pilot spacing in subcarriers.")
+    parser.add_argument("--num-tx-antennas", type=int, default=1, help="Number of BS transmit antennas.")
+    parser.add_argument("--num-rx-antennas", type=int, default=1, help="Number of UE receive antennas.")
+    parser.add_argument("--array-type", default="ula", choices=("ula",), help="Antenna array type.")
+    parser.add_argument("--array-size", default="1x1", help="Linear array size, e.g. 1x4.")
     parser.add_argument("--snr-db", type=float, default=20.0, help="Target AWGN SNR in dB.")
     parser.add_argument(
         "--channel",
@@ -80,6 +84,10 @@ def main() -> None:
         snr_db=args.snr_db,
         rng_seed=args.seed,
         pilot_spacing=args.pilot_spacing,
+        num_tx_antennas=args.num_tx_antennas,
+        num_rx_antennas=args.num_rx_antennas,
+        array_type=args.array_type,
+        array_size=args.array_size,
     )
     channel_cfg = ChannelConfig(
         channel_type=args.channel,
@@ -129,7 +137,9 @@ def main() -> None:
         f"H.264+LDPC PSNR={traditional_psnr:.2f} dB, "
         f"CE NMSE={ce_nmse_db:.2f} dB, "
         f"BS CSI NMSE={csi_nmse_db:.2f} dB, "
-        f"Feedback={key['csi_feedback_quality'].get('feedback_method')}."
+        f"Feedback={key['csi_feedback_quality'].get('feedback_method')}, "
+        f"H_true_shape={key['channel_estimation_quality'].get('h_true_shape')}, "
+        f"H_est_shape={key['channel_estimation_quality'].get('h_est_shape')}."
     )
     print(f"Summary: {result.output_paths['run_summary_json']}")
     print(f"Artifacts: {demo_cfg.output_dir}")
@@ -153,6 +163,8 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
         f"- DL measured SNR: `{summary['dl_measured_snr_db']:.2f} dB`",
         f"- UL measured SNR: `{summary['ul_measured_snr_db']:.2f} dB`",
         f"- Doppler: `{summary['channel_doppler_hz']} Hz`",
+        f"- Tx/Rx antennas: `{summary.get('num_tx_antennas', 1)} x {summary.get('num_rx_antennas', 1)}`",
+        f"- Array: `{summary.get('array_type', 'ula')} {summary.get('array_size', '1x1')}`",
         f"- DL used symbols: `{summary['dl_used_symbols']}`",
         "",
         "## Image Reconstruction",
@@ -183,6 +195,10 @@ def write_logs(summary: dict, output_paths: dict[str, str]) -> None:
         f"- H_hat NMSE: `{ce.get('h_est_nmse_db'):.2f} dB`",
         f"- Semantic equalized EVM: `{ce.get('semantic_evm_db'):.2f} dB`",
         f"- Estimator inference time: `{ce.get('estimator_inference_time_ms'):.3f} ms`",
+        f"- X_tx shape: `{ce.get('x_tx_shape')}`",
+        f"- Y_rx shape: `{ce.get('y_rx_shape')}`",
+        f"- H_true shape: `{ce.get('h_true_shape')}`",
+        f"- H_est shape: `{ce.get('h_est_shape')}`",
         "",
         "## Artifacts",
         "",

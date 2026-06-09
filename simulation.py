@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Sequence, Tuple
 
 import numpy as np
@@ -65,17 +65,29 @@ class SimulationResult:
             "ul_used_symbols": self.ul_used_symbols,
             "bs_feedback_bit_errors": self.bs_feedback_bit_errors,
             "csi_metadata": self.csi_metadata,
-            "dl_channel_taps": [
-                [float(np.real(x)), float(np.imag(x))] for x in self.dl_channel_h
-            ],
-            "ul_channel_taps": [
-                [float(np.real(x)), float(np.imag(x))] for x in self.ul_channel_h
-            ],
+            "num_tx_antennas": self.channel_estimation_quality.get("num_tx_antennas", 1),
+            "num_rx_antennas": self.channel_estimation_quality.get("num_rx_antennas", 1),
+            "array_type": self.channel_estimation_quality.get("array_type", "ula"),
+            "array_size": self.channel_estimation_quality.get("array_size", "1x1"),
+            "dl_channel_taps": self._serialize_complex_array(self.dl_channel_h),
+            "ul_channel_taps": self._serialize_complex_array(self.ul_channel_h),
             "output_paths": self.output_paths,
             "conventional": self.conventional_metadata,
             "csi_feedback_quality": self.csi_feedback_quality,
             "channel_estimation_quality": self.channel_estimation_quality,
             "reconstructed": self.reconstructed,
+        }
+
+    @staticmethod
+    def _serialize_complex_array(x: ComplexArray) -> list:
+        arr = np.asarray(x)
+        if arr.ndim == 0:
+            return [float(np.real(arr)), float(np.imag(arr))]
+        if arr.ndim == 1:
+            return [[float(np.real(v)), float(np.imag(v))] for v in arr]
+        return {
+            "shape": list(arr.shape),
+            "preview": [[float(np.real(v)), float(np.imag(v))] for v in arr.reshape(-1)[:16]],
         }
 
 
@@ -198,10 +210,30 @@ class TDDPhysicalLayerSimulation:
             }
         )
 
-        compressed = self._compress_csi_for_ul_capacity(dl_rx.h_est)
+        feedback_h_est = self._feedback_csi_view(dl_rx.h_est)
+        feedback_h_true = self._feedback_csi_view(h_true)
+        compressed = self._compress_csi_for_ul_capacity(feedback_h_est)
         ul_tx, ul_used_symbols, ul_grids = self.ue.build_csi_feedback(compressed)
-        ul_h = dl_channel.impulse_response if self.reciprocal_tdd else None
-        ul_channel = self.channel.transmit(ul_tx, h=ul_h)
+        if self.phy_cfg.is_mimo:
+            ul_phy_cfg = replace(
+                self.phy_cfg,
+                num_tx_antennas=1,
+                num_rx_antennas=1,
+                array_size="1x1",
+            )
+            ul_channel_model = MultipathChannel(
+                ul_phy_cfg,
+                channel_type=self.channel_cfg.channel_type,
+                delays=self.channel_cfg.delays,
+                powers_db=self.channel_cfg.powers_db,
+                rician_k_db=self.channel_cfg.rician_k_db,
+                doppler_hz=self.channel_cfg.doppler_hz,
+                rng=np.random.default_rng(self.phy_cfg.rng_seed + 1),
+            )
+            ul_channel = ul_channel_model.transmit(ul_tx)
+        else:
+            ul_h = dl_channel.impulse_response if self.reciprocal_tdd else None
+            ul_channel = self.channel.transmit(ul_tx, h=ul_h)
         recovered_bits = self.bs.receive_csi_feedback(
             ul_channel.waveform,
             noise_variance=ul_channel.noise_variance,
@@ -211,7 +243,15 @@ class TDDPhysicalLayerSimulation:
         comparable = min(recovered_bits.size, compressed.bitstream.size)
         bit_errors = int(np.sum(recovered_bits[:comparable] != compressed.bitstream[:comparable]))
         bit_errors += int(compressed.bitstream.size - comparable)
-        csi_quality = self._evaluate_csi_feedback(dl_rx.h_est, compressed, recovered_bits, bit_errors, h_true=h_true)
+        csi_quality = self._evaluate_csi_feedback(
+            feedback_h_est,
+            compressed,
+            recovered_bits,
+            bit_errors,
+            h_true=feedback_h_true,
+        )
+        if self.phy_cfg.is_mimo:
+            csi_quality["mimo_feedback_scope"] = "representative_rx0_tx0_subchannel"
         ce_quality = {
             "estimator": self.channel_estimator,
             "h_est_nmse": float(csi_nmse(h_true, dl_rx.h_est)),
@@ -221,6 +261,15 @@ class TDDPhysicalLayerSimulation:
                 20.0 * np.log10(max(self._evm(self.codec.last_tx_symbols, dl_rx.semantic_equalized), 1e-30))
             ),
             "estimator_inference_time_ms": float(dl_rx.estimator_inference_time_ms),
+            "x_tx_shape": list(np.asarray(dl_build.grids).shape),
+            "y_rx_shape": list(np.asarray(dl_rx.rx_grids).shape),
+            "h_true_shape": list(np.asarray(h_true).shape),
+            "h_est_shape": list(np.asarray(dl_rx.h_est).shape),
+            "num_tx_antennas": self.phy_cfg.num_tx_antennas,
+            "num_rx_antennas": self.phy_cfg.num_rx_antennas,
+            "array_type": self.phy_cfg.array_type,
+            "array_size": self.phy_cfg.array_size,
+            "mimo_equalizer": "single_stream_rx_mmse_combiner" if self.phy_cfg.is_mimo else "siso_mmse",
         }
 
         self._write_visualizations(
@@ -285,12 +334,19 @@ class TDDPhysicalLayerSimulation:
             )
         plot_time_frequency_resource_grid(
             self.phy_cfg,
-            dl_grids,
+            [grid[0] if np.asarray(grid).ndim == 3 else grid for grid in dl_grids],
             ul_grids,
             dl_allocations,
             self.output_paths["resource_grid"],
         )
         plot_frame_structure(self.phy_cfg, self.output_paths["frame_structure"])
+
+    @staticmethod
+    def _feedback_csi_view(h_est: ComplexArray) -> ComplexArray:
+        h_est = np.asarray(h_est)
+        if h_est.ndim == 5:
+            return h_est[:, 0, 0]
+        return h_est
 
     def _compress_csi_for_ul_capacity(self, h_est: ComplexArray) -> CompressedCSI:
         """Choose the smallest downsampling stride that fits the configured UL."""
@@ -304,15 +360,16 @@ class TDDPhysicalLayerSimulation:
         max_segments = capacity_bits // bits_per_segment
         total_symbols = h_est.shape[0] * h_est.shape[-1]
         if max_segments >= 1:
-            compressed = compress_csi_delay_domain(
-                h_est,
-                self.phy_cfg,
-                n_taps=n_taps,
-                bits_per_component=8,
-                time_segments=min(total_symbols, int(max_segments)),
-            )
-            compressed.metadata["ul_capacity_bits"] = int(capacity_bits)
-            return compressed
+            if np.asarray(h_est).ndim == 3:
+                compressed = compress_csi_delay_domain(
+                    h_est,
+                    self.phy_cfg,
+                    n_taps=n_taps,
+                    bits_per_component=8,
+                    time_segments=min(total_symbols, int(max_segments)),
+                )
+                compressed.metadata["ul_capacity_bits"] = int(capacity_bits)
+                return compressed
         for stride in range(4, self.phy_cfg.n_subcarriers + 1):
             compressed = compress_csi(h_est, subcarrier_stride=stride)
             if compressed.bitstream.size <= capacity_bits:

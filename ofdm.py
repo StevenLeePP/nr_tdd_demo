@@ -16,8 +16,11 @@ class OFDMModem:
         self.cfg = cfg
 
     def modulate_slot(self, grid: ComplexArray) -> ComplexArray:
+        grid = np.asarray(grid, dtype=np.complex128)
+        if grid.ndim == 3:
+            return np.stack([self.modulate_slot(grid[tx_idx]) for tx_idx in range(grid.shape[0])], axis=0)
         if grid.shape != (self.cfg.n_subcarriers, self.cfg.symbols_per_slot):
-            raise ValueError("Grid shape must be (n_subcarriers, 14).")
+            raise ValueError("Grid shape must be (n_subcarriers, 14) or (num_tx, n_subcarriers, 14).")
 
         symbols = []
         for symbol_idx, cp_len in enumerate(self.cfg.cp_lengths):
@@ -43,9 +46,15 @@ class OFDMModem:
         return grid
 
     def modulate_frame(self, grids: Sequence[ComplexArray]) -> ComplexArray:
-        return np.concatenate([self.modulate_slot(grid) for grid in grids])
+        slots = [self.modulate_slot(grid) for grid in grids]
+        axis = 1 if slots and np.asarray(slots[0]).ndim == 2 else 0
+        return np.concatenate(slots, axis=axis)
 
     def demodulate_frame(self, waveform: ComplexArray, n_slots: int) -> List[ComplexArray]:
+        waveform = np.asarray(waveform, dtype=np.complex128)
+        if waveform.ndim == 2:
+            per_rx = [self.demodulate_frame(waveform[rx_idx], n_slots) for rx_idx in range(waveform.shape[0])]
+            return [np.stack([per_rx[rx_idx][slot_idx] for rx_idx in range(waveform.shape[0])], axis=0) for slot_idx in range(n_slots)]
         grids = []
         for slot_idx in range(n_slots):
             start = slot_idx * self.cfg.slot_samples

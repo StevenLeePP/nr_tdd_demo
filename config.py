@@ -28,6 +28,10 @@ class NRPhyConfig:
     snr_db: float = 20.0
     rng_seed: int = 7
     pilot_spacing: int = 4
+    num_tx_antennas: int = 1
+    num_rx_antennas: int = 1
+    array_type: str = "ula"
+    array_size: str = "1x1"
 
     def __post_init__(self) -> None:
         if self.symbols_per_slot != 14:
@@ -42,6 +46,17 @@ class NRPhyConfig:
             raise ValueError("Use an NR SCS value: 15, 30, 60, 120, or 240 kHz.")
         if self.pilot_spacing <= 0:
             raise ValueError("pilot_spacing must be positive.")
+        if self.num_tx_antennas <= 0 or self.num_rx_antennas <= 0:
+            raise ValueError("num_tx_antennas and num_rx_antennas must be positive.")
+        if self.array_type.lower() != "ula":
+            raise ValueError("Only --array-type ula is supported in the first MIMO version.")
+        expected_size = f"1x{max(self.num_tx_antennas, self.num_rx_antennas)}"
+        if self.is_mimo and self.array_size.lower() != expected_size:
+            raise ValueError(f"For this ULA MIMO mode, array_size should be {expected_size}.")
+
+    @property
+    def is_mimo(self) -> bool:
+        return self.num_tx_antennas > 1 or self.num_rx_antennas > 1
 
     @property
     def subcarrier_spacing_hz(self) -> float:

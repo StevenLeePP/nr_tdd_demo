@@ -59,6 +59,8 @@ class MultipathChannel:
         )
 
     def sample_impulse_response(self) -> ComplexArray:
+        if self.cfg.is_mimo:
+            return self.sample_mimo_impulse_response()
         if self.channel_type == "awgn":
             return np.array([1.0 + 0.0j], dtype=np.complex128)
 
@@ -80,8 +82,43 @@ class MultipathChannel:
             h[delay] += tap
         return h
 
+    def _sample_taps(self) -> ComplexArray:
+        if self.channel_type == "awgn":
+            return np.array([1.0 + 0.0j], dtype=np.complex128)
+        taps = (
+            self.rng.normal(size=self.delays.size)
+            + 1j * self.rng.normal(size=self.delays.size)
+        ) / math.sqrt(2.0)
+        taps *= np.sqrt(self.powers_linear)
+        if self.channel_type == "rician":
+            k = self.rician_k_linear
+            los_power = self.powers_linear[0]
+            diffuse = taps[0] * math.sqrt(1.0 / (k + 1.0))
+            los = math.sqrt(k / (k + 1.0) * los_power)
+            taps[0] = los + diffuse
+        h = np.zeros(int(np.max(self.delays)) + 1, dtype=np.complex128)
+        for delay, tap in zip(self.delays, taps):
+            h[delay] += tap
+        return h
+
+    def sample_mimo_impulse_response(self) -> ComplexArray:
+        if self.channel_type == "awgn":
+            h = np.zeros((self.cfg.num_rx_antennas, self.cfg.num_tx_antennas, 1), dtype=np.complex128)
+            for ant_idx in range(min(self.cfg.num_rx_antennas, self.cfg.num_tx_antennas)):
+                h[ant_idx, ant_idx, 0] = 1.0 + 0.0j
+            return h
+        tap_len = int(np.max(self.delays)) + 1
+        h = np.zeros((self.cfg.num_rx_antennas, self.cfg.num_tx_antennas, tap_len), dtype=np.complex128)
+        for rx_idx in range(self.cfg.num_rx_antennas):
+            for tx_idx in range(self.cfg.num_tx_antennas):
+                h[rx_idx, tx_idx] = self._sample_taps()
+        return h
+
     def transmit(self, waveform: ComplexArray, h: Optional[ComplexArray] = None) -> ChannelOutput:
         h = self.sample_impulse_response() if h is None else np.asarray(h, dtype=np.complex128)
+        waveform = np.asarray(waveform, dtype=np.complex128)
+        if waveform.ndim == 2 or h.ndim == 3:
+            return self._transmit_mimo(waveform, h)
 
         if self.doppler_hz > 0.0 and self.channel_type != "awgn" and h.size > 1:
             faded, h_grid = self._transmit_time_varying(waveform, h)
@@ -95,6 +132,29 @@ class MultipathChannel:
         noise_variance = signal_power / db_to_linear(self.cfg.snr_db)
         noise = math.sqrt(noise_variance / 2.0) * (
             self.rng.normal(size=faded.size) + 1j * self.rng.normal(size=faded.size)
+        )
+        measured_snr_db = 10.0 * math.log10(signal_power / max(noise_variance, 1e-30))
+        return ChannelOutput(faded + noise, h, noise_variance, measured_snr_db, h_grid)
+
+    def _transmit_mimo(self, waveform: ComplexArray, h: ComplexArray) -> ChannelOutput:
+        if waveform.ndim != 2:
+            waveform = np.tile(waveform[None, :], (self.cfg.num_tx_antennas, 1))
+        if h.ndim != 3:
+            h_mimo = np.zeros((self.cfg.num_rx_antennas, self.cfg.num_tx_antennas, h.size), dtype=np.complex128)
+            for rx_idx in range(self.cfg.num_rx_antennas):
+                for tx_idx in range(self.cfg.num_tx_antennas):
+                    h_mimo[rx_idx, tx_idx] = h
+            h = h_mimo
+        faded = np.zeros((h.shape[0], waveform.shape[1]), dtype=np.complex128)
+        for rx_idx in range(h.shape[0]):
+            for tx_idx in range(h.shape[1]):
+                faded[rx_idx] += np.convolve(waveform[tx_idx], h[rx_idx, tx_idx], mode="full")[: waveform.shape[1]]
+        n_slots = max(1, int(round(waveform.shape[1] / self.cfg.slot_samples)))
+        h_grid = mimo_impulse_response_to_grid(self.cfg, h, n_slots=n_slots)
+        signal_power = float(np.mean(np.abs(faded) ** 2))
+        noise_variance = signal_power / db_to_linear(self.cfg.snr_db)
+        noise = math.sqrt(noise_variance / 2.0) * (
+            self.rng.normal(size=faded.shape) + 1j * self.rng.normal(size=faded.shape)
         )
         measured_snr_db = 10.0 * math.log10(signal_power / max(noise_variance, 1e-30))
         return ChannelOutput(faded + noise, h, noise_variance, measured_snr_db, h_grid)
@@ -126,6 +186,22 @@ def impulse_response_to_grid(cfg: NRPhyConfig, h: ComplexArray, n_slots: int = 1
     active_h = h_bins[cfg.active_fft_slice]
     slot_grid = np.tile(active_h[:, None], (1, cfg.symbols_per_slot))
     return np.stack([slot_grid.copy() for _ in range(n_slots)], axis=0)
+
+
+def mimo_impulse_response_to_grid(cfg: NRPhyConfig, h: ComplexArray, n_slots: int = 1) -> ComplexArray:
+    """Convert [N_rx, N_tx, taps] MIMO impulse responses to H grids."""
+    h = np.asarray(h, dtype=np.complex128)
+    if h.ndim != 3:
+        raise ValueError("MIMO impulse response must have shape [N_rx, N_tx, taps].")
+    grids = np.zeros(
+        (n_slots, h.shape[0], h.shape[1], cfg.n_subcarriers, cfg.symbols_per_slot),
+        dtype=np.complex128,
+    )
+    for rx_idx in range(h.shape[0]):
+        for tx_idx in range(h.shape[1]):
+            siso_grid = impulse_response_to_grid(cfg, h[rx_idx, tx_idx], n_slots=n_slots)
+            grids[:, rx_idx, tx_idx] = siso_grid
+    return grids
 
 
 def time_varying_impulse_response_to_grid(

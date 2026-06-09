@@ -7,5 +7,6 @@
 | v3 | `v3_comm_foundation_model_experiment_plan_results.md` | 系统实验计划、诊断脚本、正式训练/端到端复测结果汇总模板 |
 | v4 | `v4_adaptive_research_direction.md` | residual 可训练性诊断、自适应决策器、瓶颈定位和下一步路线 |
 | v5 | `v5_low_snr_doppler_channel_estimation.md` | 低信噪比、多普勒和非理想信道下的信道估计压力测试 |
+| v6 | `v6_mimo_4x4_minimal_extension.md` | SISO 到 4x4 MIMO 的最小可运行扩展、导频、均衡和 smoke 结果 |
 
-后续报告文件名继续使用 `v6_...md`、`v7_...md` 递增，便于按 git commit 和报告版本追溯实验历史。
+后续报告文件名继续使用 `v7_...md`、`v8_...md` 递增，便于按 git commit 和报告版本追溯实验历史。
